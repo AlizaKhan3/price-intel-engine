@@ -12,6 +12,7 @@ import logging
 from datetime import datetime
 
 from pymongo import UpdateOne
+from bson import ObjectId
 
 from app.catalog.mapper import project_product
 from app.config import get_settings
@@ -56,6 +57,7 @@ async def sync_full_catalog(
     tenant: dict,
     batch_size: int = 500,
     limit: int | None = None,
+    product_id: str | None = None,
 ) -> dict:
     catalog = tenant.get("catalog") or {}
     tenant_key = tid(tenant)
@@ -64,13 +66,18 @@ async def sync_full_catalog(
     started = datetime.utcnow()
     await dest.sync_runs.update_one(
         {"tenant_id": tenant_key, "job": "catalog"},
-        {"$set": {"status": "running", "started_at": started, "finished_at": None, "error": None, "limit": limit}},
+        {"$set": {"status": "running", "started_at": started, "finished_at": None, "error": None, "limit": limit, "product_id": product_id}},
         upsert=True,
     )
 
     try:
         result = await _sync_full_catalog_inner(
-            tenant, batch_size=batch_size, limit=limit, source=source, dest=dest
+            tenant,
+            batch_size=batch_size,
+            limit=limit,
+            product_id=product_id,
+            source=source,
+            dest=dest,
         )
     except Exception as exc:
         logger.exception("Catalog sync failed tenant=%s", tenant_key)
@@ -94,6 +101,7 @@ async def _sync_full_catalog_inner(
     *,
     batch_size: int,
     limit: int | None,
+    product_id: str | None = None,
     source,
     dest,
 ) -> dict:
@@ -105,13 +113,15 @@ async def _sync_full_catalog_inner(
     marketplaces_col = catalog.get("marketplaces_collection") or settings.CATALOG_MARKETPLACES_COLLECTION
     groups_col = catalog.get("product_groups_collection") or settings.CATALOG_PRODUCT_GROUPS_COLLECTION
 
-    logger.info("Catalog sync starting tenant=%s limit=%s", tenant_key, limit)
+    logger.info("Catalog sync starting tenant=%s limit=%s product_id=%s", tenant_key, limit, product_id)
     category_names = await _name_map(source[categories_col])
     marketplace_names = await _name_map(source[marketplaces_col])
     group_marketplaces = await _group_marketplace_map(source[groups_col])
 
     query: dict = {}
-    if catalog.get("sync_active_only", settings.CATALOG_SYNC_ACTIVE_ONLY):
+    if product_id:
+        query["_id"] = ObjectId(product_id)
+    elif catalog.get("sync_active_only", settings.CATALOG_SYNC_ACTIVE_ONLY):
         query["active"] = True
 
     count = 0

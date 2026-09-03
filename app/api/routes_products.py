@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 
 from app.api.deps import get_current_tenant
 from app.api.serialize import dump_doc, dump_docs
@@ -49,16 +49,21 @@ async def trigger_catalog_sync(
         default=None,
         ge=1,
         le=50000,
-        description="Sync only this many products. Use 200 for a smoke test.",
+        description="Sync only this many products. Use 200 for a smoke test. Omit for a full sync.",
+    ),
+    product_id: str | None = Query(
+        default=None,
+        description="Sync only this catalog _id (e.g. a live sadiq product).",
     ),
 ):
     if wait:
-        return await sync_full_catalog(tenant, limit=limit)
-    background_tasks.add_task(sync_full_catalog, tenant, limit=limit)
+        return await sync_full_catalog(tenant, limit=limit, product_id=product_id)
+    background_tasks.add_task(sync_full_catalog, tenant, 500, limit, product_id)
     return {
         "status": "started",
         "message": "Sync running in the background. Watch the server terminal, then GET /v1/catalog/status or GET /v1/products.",
         "limit": limit,
+        "product_id": product_id,
     }
 
 
@@ -105,6 +110,14 @@ async def list_products(
 async def get_product(product_id: str, tenant: dict = Depends(get_current_tenant)):
     db = get_priceintel_db()
     product = await db.catalog_products.find_one({"tenant_id": tid(tenant), "id": product_id})
+    if not product:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"Product {product_id} is not in PriceIntel yet. "
+                "Run POST /v1/catalog/sync?wait=true&product_id=" + product_id
+            ),
+        )
     return dump_doc(product)
 
 

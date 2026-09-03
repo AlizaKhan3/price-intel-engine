@@ -48,7 +48,7 @@ class Settings(BaseSettings):
     TENANT_NAME: str = "Sadiq.ai"
     TENANT_API_KEY: str = "change-me"
     STOREFRONT_BASE_URL: str = "https://www.sadiq.ai"
-    STOREFRONT_PRODUCT_URL_TEMPLATE: str = "https://www.sadiq.ai/product/{id}"
+    STOREFRONT_PRODUCT_URL_TEMPLATE: str = "https://www.sadiq.ai/product-details/{slug}/{group_id}-{id}"
 
     # Platform admin key — used only to create/list tenants, never given to customers.
     ADMIN_API_KEY: str = "change-me-admin"

@@ -9,6 +9,7 @@ not code — stored on the tenant record so onboarding a new marketplace does
 not require a deploy.
 """
 from datetime import datetime
+import re
 from typing import Any
 
 from bson import ObjectId
@@ -32,13 +33,17 @@ DEFAULT_FIELD_MAP: dict[str, str | list[str]] = {
 }
 
 
-def _get(raw: dict, spec: str | list[str] | None) -> Any:
+def _get(raw: dict, spec: str | list[str] | None, *, skip_zero: bool = False) -> Any:
     if spec is None:
         return None
     keys = spec if isinstance(spec, list) else [spec]
     for key in keys:
-        if key in raw and raw[key] is not None:
-            return raw[key]
+        if key not in raw or raw[key] is None:
+            continue
+        value = raw[key]
+        if skip_zero and value in (0, 0.0, "0"):
+            continue
+        return value
     return None
 
 
@@ -58,6 +63,24 @@ def as_float(value: Any) -> float:
         return float(value)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _slugify(text: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", (text or "").lower()).strip("-")
+    return slug or "product"
+
+
+def _storefront_url(template: str, raw: dict, product_id: str, group_id: str | None) -> str:
+    title = raw.get("name") or raw.get("title") or "product"
+    slug = raw.get("slug") or _slugify(str(title))
+    try:
+        return template.format(
+            id=product_id,
+            slug=slug,
+            group_id=group_id or product_id,
+        )
+    except KeyError:
+        return f"https://www.sadiq.ai/product-details/{slug}/{group_id or product_id}-{product_id}"
 
 
 def as_int(value: Any) -> int:
@@ -107,11 +130,11 @@ def project_product(
         "marketplace_id": marketplace_id,
         "marketplace": marketplace_names.get(marketplace_id or "") or marketplace_id,
         "group_id": group_id,
-        "price": as_float(_get(raw, fmap.get("price"))),
+        "price": as_float(_get(raw, fmap.get("price"), skip_zero=True)),
         "original_price": as_float(original) if original is not None else None,
         "currency": "PKR",
         "image_url": _get(raw, fmap.get("image_url")),
-        "url": product_url_template.format(id=product_id, slug=raw.get("slug") or product_id),
+        "url": _storefront_url(product_url_template, raw, product_id, group_id),
         "stock": stock,
         "in_stock": stock > 0,
         "active": bool(_get(raw, fmap.get("active"))),

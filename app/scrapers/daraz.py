@@ -48,6 +48,9 @@ class DarazScraper(BaseScraper):
         if price is None:
             price_text = await _text(page, [".pdp-price", ".pdp-v2-product-price", '[class*="pdp-price"]'])
             price = _parse_price(price_text or "")
+        url_price = _price_from_url(url)
+        if url_price and (price is None or price < 1):
+            price = url_price
 
         if not title or price is None:
             logger.warning("Could not parse Daraz product page %s title=%r price=%r", url, title, price)
@@ -129,9 +132,22 @@ async def _text(page, selectors: list[str]) -> str | None:
     return None
 
 
+def _price_from_url(url: str) -> float | None:
+    from urllib.parse import parse_qs, urlparse
+
+    values = parse_qs(urlparse(url).query).get("price") or []
+    return _parse_price(values[0]) if values else None
+
+
 def _parse_price(text: str) -> float | None:
-    digits = re.sub(r"[^\d.]", "", text or "")
-    return float(digits) if digits else None
+    if not text:
+        return None
+    cleaned = re.sub(r"(rs\.?|pkr)", " ", str(text), flags=re.I)
+    cleaned = cleaned.replace(",", "").replace("₹", "")
+    match = re.search(r"(\d+(?:\.\d+)?)", cleaned)
+    if not match:
+        return None
+    return float(match.group(1))
 
 
 def _extract_id(url: str) -> str:
