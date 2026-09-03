@@ -74,17 +74,21 @@ def project_product(
     field_map: dict | None = None,
     category_names: dict[str, str] | None = None,
     marketplace_names: dict[str, str] | None = None,
+    group_marketplaces: dict[str, str] | None = None,
     product_url_template: str = "https://www.sadiq.ai/product/{id}",
 ) -> dict:
     """Normalize one vendor catalog document into PriceIntel's internal shape."""
     fmap = {**DEFAULT_FIELD_MAP, **(field_map or {})}
     category_names = category_names or {}
     marketplace_names = marketplace_names or {}
+    group_marketplaces = group_marketplaces or {}
 
     product_id = str(raw["_id"])
     category_id = as_str(_get(raw, fmap.get("category_id")))
     marketplace_id = as_str(_get(raw, fmap.get("marketplace_id")))
     group_id = as_str(_get(raw, fmap.get("group_id")))
+    if not marketplace_id and group_id:
+        marketplace_id = group_marketplaces.get(group_id)
     stock = as_int(_get(raw, fmap.get("stock")))
     original = _get(raw, fmap.get("original_price"))
     sku = _get(raw, fmap.get("sku"))

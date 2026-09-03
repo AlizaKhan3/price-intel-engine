@@ -23,6 +23,17 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 
 
+async def _group_marketplace_map(collection) -> dict[str, str]:
+    """group_id -> marketplace_id from productgroups (some SKUs omit marketplace)."""
+    mapping: dict[str, str] = {}
+    try:
+        async for doc in collection.find({"marketplace": {"$ne": None}}, {"marketplace": 1}):
+            mapping[str(doc["_id"])] = str(doc["marketplace"])
+    except Exception:
+        logger.warning("Could not load product group marketplaces")
+    return mapping
+
+
 async def _name_map(collection, name_fields: tuple[str, ...] = ("name", "title", "label")) -> dict[str, str]:
     mapping: dict[str, str] = {}
     if collection is None:
@@ -92,10 +103,12 @@ async def _sync_full_catalog_inner(
     products_col = catalog.get("products_collection") or settings.CATALOG_PRODUCTS_COLLECTION
     categories_col = catalog.get("categories_collection") or settings.CATALOG_CATEGORIES_COLLECTION
     marketplaces_col = catalog.get("marketplaces_collection") or settings.CATALOG_MARKETPLACES_COLLECTION
+    groups_col = catalog.get("product_groups_collection") or settings.CATALOG_PRODUCT_GROUPS_COLLECTION
 
     logger.info("Catalog sync starting tenant=%s limit=%s", tenant_key, limit)
     category_names = await _name_map(source[categories_col])
     marketplace_names = await _name_map(source[marketplaces_col])
+    group_marketplaces = await _group_marketplace_map(source[groups_col])
 
     query: dict = {}
     if catalog.get("sync_active_only", settings.CATALOG_SYNC_ACTIVE_ONLY):
@@ -122,6 +135,7 @@ async def _sync_full_catalog_inner(
             field_map=field_map,
             category_names=category_names,
             marketplace_names=marketplace_names,
+            group_marketplaces=group_marketplaces,
             product_url_template=url_template,
         )
         batch.append(doc)

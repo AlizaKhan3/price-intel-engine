@@ -57,12 +57,45 @@ async def _compare_catalog_groups(db, tenant: dict, tenant_key: str) -> list[dic
     for group_id, listings in by_group.items():
         if len(listings) < 2:
             continue
-        listings.sort(key=lambda p: p.get("price") or 0)
-        cheapest = listings[0]
-        for listing in listings[1:]:
+
+        # Drop obvious bad prices (e.g. Rs. 83 next to Rs. 73,800 in the same group).
+        prices = sorted(p.get("price") or 0 for p in listings if (p.get("price") or 0) > 0)
+        if len(prices) >= 2:
+            median = prices[len(prices) // 2]
+            listings = [
+                p
+                for p in listings
+                if _price_is_sane(p.get("price") or 0, median)
+            ]
+        if len(listings) < 2:
+            continue
+
+        # Size/weight variants of one seller share group_id (3kg vs 25kg rice).
+        # Inherit marketplace from siblings when a SKU left it blank, then
+        # compare only across *different* marketplaces.
+        inherited = _inherit_marketplace(listings)
+        by_marketplace: dict[str, list[dict]] = {}
+        for listing in inherited:
+            key = listing.get("marketplace_id")
+            if not key:
+                continue
+            by_marketplace.setdefault(str(key), []).append(listing)
+
+        if len(by_marketplace) < 2:
+            continue
+
+        # Cheapest listing per marketplace, then compare marketplaces.
+        marketplace_cheapest = []
+        for mp_key, mp_listings in by_marketplace.items():
+            mp_listings.sort(key=lambda p: p.get("price") or 0)
+            marketplace_cheapest.append(mp_listings[0])
+
+        marketplace_cheapest.sort(key=lambda p: p.get("price") or 0)
+        cheapest = marketplace_cheapest[0]
+        for listing in marketplace_cheapest[1:]:
             our_price = listing.get("price") or 0
             their_price = cheapest.get("price") or 0
-            if not our_price:
+            if not our_price or not their_price:
                 continue
             gap_pct = round((our_price - their_price) / our_price * 100, 2)
             comparison = {
@@ -72,12 +105,24 @@ async def _compare_catalog_groups(db, tenant: dict, tenant_key: str) -> list[dic
                 "group_id": group_id,
                 "our_price": our_price,
                 "our_marketplace": listing.get("marketplace"),
-                "competitor": cheapest.get("marketplace") or "catalog",
+                "our_marketplace_id": listing.get("marketplace_id"),
+                "compare_marketplace": cheapest.get("marketplace"),
+                "compare_marketplace_id": cheapest.get("marketplace_id"),
+                "compare_price": their_price,
+                "compare_url": cheapest.get("url"),
+                "compare_product_id": cheapest["id"],
+                # Legacy names kept for existing clients.
+                "competitor": cheapest.get("marketplace"),
                 "competitor_price": their_price,
                 "competitor_url": cheapest.get("url"),
                 "competitor_product_id": cheapest["id"],
                 "gap_pct": gap_pct,
                 "source": "catalog_group",
+                "note": (
+                    "Compared to another marketplace listing on YOUR catalog "
+                    "(same group_id). This is not Daraz or an external site. "
+                    "Size/weight variants of the same seller are not compared."
+                ),
             }
             results.append(comparison)
             await _record_snapshot(db, tenant_key, f"{tenant_key}:{listing['id']}", our_price, listing.get("in_stock", True))
@@ -91,6 +136,30 @@ async def _compare_catalog_groups(db, tenant: dict, tenant_key: str) -> list[dic
             if gap_pct >= gap_floor:
                 await _raise_alert(db, tenant, comparison)
     return results
+
+
+def _inherit_marketplace(listings: list[dict]) -> list[dict]:
+    known_ids = {p.get("marketplace_id") for p in listings if p.get("marketplace_id")}
+    known_names = {p.get("marketplace") for p in listings if p.get("marketplace")}
+    only_id = next(iter(known_ids)) if len(known_ids) == 1 else None
+    only_name = next(iter(known_names)) if len(known_names) == 1 else None
+    filled = []
+    for listing in listings:
+        row = dict(listing)
+        if not row.get("marketplace_id") and only_id:
+            row["marketplace_id"] = only_id
+        if not row.get("marketplace") and only_name:
+            row["marketplace"] = only_name
+        filled.append(row)
+    return filled
+
+
+def _price_is_sane(price: float, median: float) -> bool:
+    """Exclude outliers that are almost certainly bad catalog data or different units."""
+    if price <= 0 or median <= 0:
+        return False
+    ratio = price / median
+    return 0.05 <= ratio <= 20
 
 
 async def _compare_approved_matches(db, tenant: dict, tenant_key: str) -> list[dict]:
