@@ -6,36 +6,52 @@ from pydantic import BaseModel, Field, HttpUrl
 from app.api.deps import get_current_tenant
 from app.api.serialize import dump_docs
 from app.db import get_priceintel_db
-from app.services.scrape import scrape_product_url
+from app.services.scrape import compare_storefront_and_competitor, scrape_product_url
 from app.services.tenants import tenant_id as tid
+from app.services.urls import competitor_from_url
 
 router = APIRouter(prefix="/scrape", tags=["scrape"])
 
 
 class ScrapeOneBody(BaseModel):
-    product_id: str = Field(..., description="Your catalog product _id, e.g. 64e4a35038023b2b950bf30c")
-    competitor_url: HttpUrl = Field(..., description="Daraz product page, https://www.daraz.pk/products/...")
-    competitor: str = "daraz"
-    auto_approve: bool = Field(
-        default=True,
-        description="If true, treat this URL as the correct match and compute the price gap immediately.",
+    product_id: str | None = Field(default=None, description="Catalog product _id")
+    storefront_url: HttpUrl | None = Field(
+        default=None,
+        description="Your product page, e.g. https://www.sadiq.ai/product-details/.../{group}-{id}",
     )
+    competitor_url: HttpUrl
+    competitor: str | None = Field(
+        default=None,
+        description="Optional. If omitted, taken from the competitor URL hostname (daraz, telemart, …).",
+    )
+    auto_approve: bool = True
+
+
+class CompareLinksBody(BaseModel):
+    storefront_url: HttpUrl
+    competitor_url: HttpUrl
 
 
 @router.post(
     "/one",
     summary="Scrape one competitor product URL",
-    description=(
-        "Daraz blocks catalog search in robots.txt, so you paste a Daraz **product** URL. "
-        "We open that page, read title + price, attach it to your product, and return the gap."
-    ),
+    description="Paste your product id or storefront URL plus any competitor product URL.",
 )
 async def scrape_one(body: ScrapeOneBody, tenant: dict = Depends(get_current_tenant)):
     try:
+        if body.storefront_url:
+            return await compare_storefront_and_competitor(
+                tenant,
+                storefront_url=str(body.storefront_url),
+                competitor_url=str(body.competitor_url),
+                auto_approve=body.auto_approve,
+            )
+        if not body.product_id:
+            raise ValueError("Provide product_id or storefront_url.")
         return await scrape_product_url(
             tenant,
             product_id=body.product_id,
-            competitor=body.competitor,
+            competitor=body.competitor or competitor_from_url(str(body.competitor_url)),
             competitor_url=str(body.competitor_url),
             auto_approve=body.auto_approve,
         )
@@ -43,6 +59,25 @@ async def scrape_one(body: ScrapeOneBody, tenant: dict = Depends(get_current_ten
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.post(
+    "/compare-links",
+    summary="Compare two product links",
+    description="Your storefront URL + any competitor product URL. Returns a plain-language result.",
+)
+async def compare_links(body: CompareLinksBody, tenant: dict = Depends(get_current_tenant)):
+    try:
+        return await compare_storefront_and_competitor(
+            tenant,
+            storefront_url=str(body.storefront_url),
+            competitor_url=str(body.competitor_url),
+            auto_approve=True,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 

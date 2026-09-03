@@ -7,10 +7,32 @@ from datetime import datetime
 from app.db import get_priceintel_db
 from app.models.product import MatchStatus, MatchTier
 from app.scrapers.registry import get_scraper
+from app.services.catalog_sync import sync_full_catalog
+from app.services.compare_summary import explain_prices
 from app.services.matching.pipeline import find_best_match
 from app.services.tenants import tenant_id as tid
+from app.services.urls import competitor_from_url, competitor_label, product_id_from_storefront_url
 
 logger = logging.getLogger(__name__)
+
+
+async def compare_storefront_and_competitor(
+    tenant: dict,
+    *,
+    storefront_url: str,
+    competitor_url: str,
+    auto_approve: bool = True,
+) -> dict:
+    product_id = product_id_from_storefront_url(storefront_url)
+    competitor = competitor_from_url(competitor_url)
+    return await scrape_product_url(
+        tenant,
+        product_id=product_id,
+        competitor=competitor,
+        competitor_url=competitor_url,
+        auto_approve=auto_approve,
+        storefront_url=storefront_url,
+    )
 
 
 async def scrape_product_url(
@@ -20,17 +42,21 @@ async def scrape_product_url(
     competitor: str,
     competitor_url: str,
     auto_approve: bool = False,
+    storefront_url: str | None = None,
 ) -> dict:
     db = get_priceintel_db()
     tenant_key = tid(tenant)
     product = await db.catalog_products.find_one({"tenant_id": tenant_key, "id": product_id})
     if not product:
-        raise ValueError(f"Product {product_id} is not in the synced catalog. Run catalog sync first.")
+        logger.info("Product %s missing from cache, syncing one document", product_id)
+        await sync_full_catalog(tenant, product_id=product_id)
+        product = await db.catalog_products.find_one({"tenant_id": tenant_key, "id": product_id})
+    if not product:
+        raise ValueError(
+            f"Product {product_id} was not found in the catalog database. Check the storefront URL."
+        )
 
     scraper = get_scraper(competitor)
-    if not hasattr(scraper, "fetch_product"):
-        raise ValueError(f"Scraper {competitor} cannot fetch a product URL yet.")
-
     from playwright.async_api import async_playwright
     from app.config import get_settings
 
@@ -45,7 +71,7 @@ async def scrape_product_url(
 
     if listing is None:
         raise RuntimeError(
-            "Could not read title/price from that page. Daraz may have blocked the browser or changed markup."
+            "Could not read title/price from that competitor page. Try another product URL."
         )
 
     payload = listing.model_dump()
@@ -83,7 +109,7 @@ async def scrape_product_url(
 
     if auto_approve:
         decision["status"] = MatchStatus.APPROVED.value
-        decision["reviewed_by"] = "scrape_api"
+        decision["reviewed_by"] = "compare_ui"
         decision["reviewed_at"] = datetime.utcnow()
 
     decision["tenant_id"] = tenant_key
@@ -97,40 +123,55 @@ async def scrape_product_url(
         upsert=True,
     )
 
-    comparison = None
-    if decision["status"] == MatchStatus.APPROVED.value:
-        our_price = product.get("price") or 0
-        their_price = saved.get("price") or 0
-        gap_pct = round((our_price - their_price) / our_price * 100, 2) if our_price else 0
-        comparison = {
-            "our_product_id": product["id"],
-            "our_title": product.get("title"),
-            "our_price": our_price,
-            "our_marketplace": product.get("marketplace"),
-            "competitor": saved.get("competitor"),
-            "competitor_title": saved.get("title"),
-            "competitor_price": their_price,
-            "competitor_url": saved.get("url"),
-            "gap_pct": gap_pct,
+    their_name = competitor_label(saved.get("competitor") or competitor)
+    our_name = product.get("marketplace") or tenant.get("name") or "Your store"
+    explained = explain_prices(
+        product.get("price") or 0,
+        saved.get("price") or 0,
+        our_label=our_name,
+        competitor_label=their_name,
+    )
+
+    comparison = {
+        "our_product_id": product["id"],
+        "our_title": product.get("title"),
+        "our_price": product.get("price") or 0,
+        "our_url": storefront_url or product.get("url"),
+        "our_marketplace": product.get("marketplace"),
+        "competitor": saved.get("competitor"),
+        "competitor_title": saved.get("title"),
+        "competitor_price": saved.get("price") or 0,
+        "competitor_url": saved.get("url"),
+        "difference_rs": explained["difference_rs"],
+        "gap_pct": explained["gap_pct"],
+        "cheaper": explained["cheaper"],
+        "headline": explained["headline"],
+        "detail": explained["detail"],
+        "source": "scrape",
+        "message": f"{explained['headline']} {explained['detail']}",
+    }
+    await db.comparisons_cache.delete_many(
+        {
+            "tenant_id": tenant_key,
+            "product_id": product["id"],
             "source": "scrape",
-            "note": "Positive gap_pct means YOUR listing is more expensive than Daraz.",
+            "competitor": saved.get("competitor"),
         }
-        await db.comparisons_cache.delete_many(
-            {
-                "tenant_id": tenant_key,
-                "product_id": product["id"],
-                "source": "scrape",
-                "competitor": saved.get("competitor"),
-            }
-        )
-        await db.comparisons_cache.insert_one({**comparison, "tenant_id": tenant_key, "product_id": product["id"]})
+    )
+    await db.comparisons_cache.insert_one({**comparison, "tenant_id": tenant_key, "product_id": product["id"]})
 
     return {
+        "message": comparison["message"],
+        "headline": explained["headline"],
+        "detail": explained["detail"],
+        "cheaper": explained["cheaper"],
+        "difference_rs": explained["difference_rs"],
         "our_product": {
             "id": product["id"],
             "title": product.get("title"),
             "price": product.get("price"),
             "marketplace": product.get("marketplace"),
+            "url": storefront_url or product.get("url"),
         },
         "competitor_listing": {
             "id": saved["id"],

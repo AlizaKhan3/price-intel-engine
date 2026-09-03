@@ -21,6 +21,7 @@ from app.api import (
     routes_matches,
     routes_products,
     routes_scrape,
+    routes_ui,
 )
 from app.config import get_settings
 from app.db import ensure_indexes
@@ -86,6 +87,7 @@ async def http_error_handler(_request: Request, exc: HTTPException):
     )
 
 
+app.include_router(routes_ui.router)
 v1 = "/v1"
 app.include_router(routes_products.router, prefix=v1)
 app.include_router(routes_matches.router, prefix=v1)
@@ -97,7 +99,7 @@ app.include_router(routes_admin.router, prefix=v1)
 
 @app.get("/", include_in_schema=False)
 async def root():
-    return RedirectResponse(url="/docs")
+    return RedirectResponse(url="/compare")
 
 
 @app.get("/health", tags=["meta"], summary="Liveness probe")
