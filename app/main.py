@@ -20,6 +20,7 @@ from app.api import (
     routes_comparisons,
     routes_matches,
     routes_products,
+    routes_scrape,
 )
 from app.config import get_settings
 from app.db import ensure_indexes
@@ -90,6 +91,7 @@ app.include_router(routes_products.router, prefix=v1)
 app.include_router(routes_matches.router, prefix=v1)
 app.include_router(routes_comparisons.router, prefix=v1)
 app.include_router(routes_alerts.router, prefix=v1)
+app.include_router(routes_scrape.router, prefix=v1)
 app.include_router(routes_admin.router, prefix=v1)
 
 

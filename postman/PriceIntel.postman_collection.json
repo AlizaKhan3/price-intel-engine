@@ -41,6 +41,11 @@
       "type": "string"
     },
     {
+      "key": "competitor_url",
+      "value": "https://www.daraz.pk/products/",
+      "type": "string"
+    },
+    {
       "key": "match_id",
       "value": "",
       "type": "string"
@@ -418,7 +423,41 @@
       ]
     },
     {
-      "name": "⑦ Full Sync (all products)",
+      "name": "⑦ Scrape Daraz (external competitor)",
+      "description": "Daraz robots.txt blocks search pages. Paste a Daraz PRODUCT url, not a search url.",
+      "item": [
+        {
+          "name": "Scrape one Daraz product URL vs your product",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"product_id\": \"{{product_id}}\",\n  \"competitor\": \"daraz\",\n  \"competitor_url\": \"{{competitor_url}}\",\n  \"auto_approve\": true\n}"
+            },
+            "url": "{{base_url}}/v1/scrape/one",
+            "description": "1. Open daraz.pk in a browser and search for the same product.\n2. Open the matching listing and copy the URL (must contain /products/).\n3. Put that URL in competitor_url.\n4. product_id is your sadiq catalog id.\n\nResponse:\n- our_price = your sadiq price\n- competitor_price = Daraz price\n- gap_pct > 0 means you are more expensive"
+          }
+        },
+        {
+          "name": "List scraped competitor listings",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/v1/scrape/listings?competitor=daraz&limit=20",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "scrape", "listings"],
+              "query": [
+                { "key": "competitor", "value": "daraz" },
+                { "key": "limit", "value": "20" }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "⑧ Full Sync (all products)",
       "description": "Run this after the smoke test works.",
       "item": [
         {

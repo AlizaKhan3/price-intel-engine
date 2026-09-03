@@ -1,94 +1,139 @@
 from __future__ import annotations
 
 """
-Example scraper — Daraz.pk.
+Daraz.pk scraper.
 
-*** IMPORTANT: THIS FILE NEEDS TO BE VERIFIED AGAINST THE LIVE SITE. ***
+Daraz robots.txt disallows `/catalog/` (search). This scraper therefore
+does **not** search Daraz. It only reads a product **detail** page you
+already have a URL for (`/products/...`).
 
-I could not test this against the real, current daraz.pk DOM from this
-environment (no general internet access in the sandbox this was built
-in). The structure below is a realistic, correctly-shaped Playwright
-scraper — the search flow, selector strategy, and data extraction
-pattern are all standard for this class of site — but the exact CSS
-selectors WILL need a five-minute check against the live page before
-this runs for real:
-
-  1. Open https://www.daraz.pk/catalog/?q=<something> in a browser
-  2. Right-click a product card -> Inspect
-  3. Update SELECTOR_* below to match what you see
-  4. Large marketplaces often front listing pages with anti-bot checks
-     (Cloudflare/PerimeterX). If Playwright gets blocked, your options,
-     cheapest first: slow down further, rotate a residential proxy, or
-     use a managed scraping API (ScraperAPI, Bright Data, ScrapingBee —
-     all have free trial tiers) that handles headless-browser + proxy +
-     CAPTCHA solving for you.
-
-Use this file as the template for every other competitor scraper
-(Telemart, iShopping.pk, etc.) — same shape, different selectors.
+Pass a Daraz product URL from Postman. We extract title + price from
+JSON-LD when present, then fall back to visible page text.
 """
+import json
+import logging
+import re
+
 from app.models.product import CompetitorListing
 from app.scrapers.base import BaseScraper
 
-SEARCH_URL = "https://www.daraz.pk/catalog/?q={query}"
+logger = logging.getLogger(__name__)
 
-# --- verify these against the live DOM before first run ---
-SELECTOR_RESULT_CARD = "div[data-qa-locator='product-item']"
-SELECTOR_TITLE = ".title--wFj93"
-SELECTOR_PRICE = ".price--NVB62"
-SELECTOR_LINK = "a"
-SELECTOR_IMAGE = "img"
+PRODUCT_URL_RE = re.compile(r"https?://(www\.)?daraz\.pk/products/", re.I)
 
 
 class DarazScraper(BaseScraper):
     competitor_name = "daraz"
 
     async def search(self, page, query: str) -> list[CompetitorListing]:
-        url = SEARCH_URL.format(query=query.replace(" ", "+"))
-        await page.goto(url, wait_until="domcontentloaded", timeout=20000)
-        await page.wait_for_selector(SELECTOR_RESULT_CARD, timeout=10000)
+        raise PermissionError(
+            "Daraz robots.txt disallows /catalog/ search. "
+            "Paste a Daraz product URL instead (https://www.daraz.pk/products/...)."
+        )
 
-        cards = await page.query_selector_all(SELECTOR_RESULT_CARD)
-        listings: list[CompetitorListing] = []
+    async def fetch_product(self, page, url: str) -> CompetitorListing | None:
+        if not PRODUCT_URL_RE.search(url):
+            raise ValueError("Expected a daraz.pk /products/ URL")
+        await page.goto(url.split("?")[0], wait_until="domcontentloaded", timeout=30000)
+        await page.wait_for_timeout(2500)
 
-        for card in cards[:10]:  # cap results per query to keep this polite
-            title_el = await card.query_selector(SELECTOR_TITLE)
-            price_el = await card.query_selector(SELECTOR_PRICE)
-            link_el = await card.query_selector(SELECTOR_LINK)
-            image_el = await card.query_selector(SELECTOR_IMAGE)
+        data = await _json_ld_product(page)
+        title = (data or {}).get("name")
+        price = _offer_price(data)
+        image_url = _image(data)
+        in_stock = _in_stock(data)
 
-            if not (title_el and price_el and link_el):
-                continue
+        if not title:
+            title = await _text(page, ["h1", ".pdp-mod-product-badge-title", '[class*="pdp-mod-product-badge-title"]'])
+        if price is None:
+            price_text = await _text(page, [".pdp-price", ".pdp-v2-product-price", '[class*="pdp-price"]'])
+            price = _parse_price(price_text or "")
 
-            title = (await title_el.inner_text()).strip()
-            price_text = (await price_el.inner_text()).strip()
-            href = await link_el.get_attribute("href")
-            image_url = await image_el.get_attribute("src") if image_el else None
+        if not title or price is None:
+            logger.warning("Could not parse Daraz product page %s title=%r price=%r", url, title, price)
+            return None
 
-            price = _parse_price(price_text)
-            if price is None or not href:
-                continue
+        canonical = (data or {}).get("url") or url.split("?")[0]
+        return CompetitorListing(
+            competitor=self.competitor_name,
+            competitor_product_id=_extract_id(canonical),
+            title=title.strip(),
+            price=price,
+            url=canonical,
+            image_url=image_url,
+            in_stock=in_stock,
+            source="scrape",
+        )
 
-            url_full = href if href.startswith("http") else f"https:{href}"
 
-            listings.append(CompetitorListing(
-                competitor=self.competitor_name,
-                competitor_product_id=_extract_id(url_full),
-                title=title,
-                price=price,
-                url=url_full,
-                image_url=image_url,
-            ))
+async def _json_ld_product(page) -> dict | None:
+    scripts = await page.eval_on_selector_all(
+        'script[type="application/ld+json"]',
+        "els => els.map(e => e.textContent)",
+    )
+    for raw in scripts or []:
+        try:
+            payload = json.loads(raw)
+        except Exception:
+            continue
+        nodes = payload if isinstance(payload, list) else [payload]
+        for node in nodes:
+            if isinstance(node, dict) and node.get("@type") in ("Product", ["Product"]):
+                return node
+            if isinstance(node, dict) and node.get("@graph"):
+                for item in node["@graph"]:
+                    if isinstance(item, dict) and item.get("@type") == "Product":
+                        return item
+    return None
 
-        return listings
+
+def _offer_price(data: dict | None) -> float | None:
+    if not data:
+        return None
+    offers = data.get("offers") or {}
+    if isinstance(offers, list) and offers:
+        offers = offers[0]
+    if not isinstance(offers, dict):
+        return None
+    return _parse_price(str(offers.get("price") or ""))
+
+
+def _image(data: dict | None) -> str | None:
+    if not data:
+        return None
+    image = data.get("image")
+    if isinstance(image, list) and image:
+        image = image[0]
+    if isinstance(image, dict):
+        return image.get("url")
+    return image if isinstance(image, str) else None
+
+
+def _in_stock(data: dict | None) -> bool:
+    if not data:
+        return True
+    offers = data.get("offers") or {}
+    if isinstance(offers, list) and offers:
+        offers = offers[0]
+    avail = str((offers or {}).get("availability") or "")
+    return "OutOfStock" not in avail
+
+
+async def _text(page, selectors: list[str]) -> str | None:
+    for sel in selectors:
+        el = await page.query_selector(sel)
+        if el:
+            text = (await el.inner_text()).strip()
+            if text:
+                return text
+    return None
 
 
 def _parse_price(text: str) -> float | None:
-    import re
-    digits = re.sub(r"[^\d.]", "", text)
+    digits = re.sub(r"[^\d.]", "", text or "")
     return float(digits) if digits else None
 
 
 def _extract_id(url: str) -> str:
-    import re
     match = re.search(r"i(\d+)-s(\d+)\.html", url)
-    return match.group(0) if match else url
+    return match.group(0) if match else url.rstrip("/").split("/")[-1]
