@@ -6,6 +6,7 @@ from fastapi.responses import HTMLResponse
 from app.services import automation, discovery
 from app.services.scrape import compare_storefront_and_competitor
 from app.services.tenants import find_tenant_by_slug
+from app.services.urls import competitor_label
 
 router = APIRouter(tags=["ui"])
 
@@ -41,21 +42,32 @@ def _page(
         </article>
         """
         rows = ""
+        ours_url = ours_p.get("url") or ""
+        rows += (
+            "<tr class='you'>"
+            f"<td>{_esc(ours_p.get('marketplace') or 'Your store')}</td>"
+            f"<td>Rs. {_fmt(ours_p.get('price'))}</td>"
+            "<td>Your listing</td>"
+            f"<td><a href='{_esc(ours_url)}' target='_blank' rel='noreferrer'>Open</a></td>"
+            "</tr>"
+        )
         for row in result.get("matches") or []:
             listing = row.get("competitor_listing") or {}
             rows += (
                 "<tr>"
-                f"<td>{_esc((listing.get('competitor') or '').title())}</td>"
-                f"<td>Rs. {_fmt(listing.get('price'))}</td>"
+            "<td>"
+            f"{_esc(competitor_label(listing.get('competitor') or ''))}"
+            f"<div class='muted'>{_esc((listing.get('title') or '')[:90])}</div>"
+            "</td>"
+            f"<td>Rs. {_fmt(listing.get('price'))}</td>"
                 f"<td>{_esc(row.get('headline'))}</td>"
                 f"<td><a href='{_esc(listing.get('url'))}' target='_blank' rel='noreferrer'>Open</a></td>"
                 "</tr>"
             )
-        if rows:
-            cards += (
-                "<table><thead><tr><th>Site</th><th>Their price</th><th>Result</th><th></th></tr></thead>"
-                f"<tbody>{rows}</tbody></table>"
-            )
+        cards += (
+            "<table><thead><tr><th>Shop</th><th>Price</th><th>vs you</th><th></th></tr></thead>"
+            f"<tbody>{rows}</tbody></table>"
+        )
         skipped = result.get("skipped") or []
         looked = result.get("searched_urls") or []
         if looked:
@@ -153,6 +165,38 @@ def _page(
     th, td {{ text-align: left; padding: 8px 6px; border-bottom: 1px solid #2c3947; vertical-align: top; }}
     th {{ color: var(--muted); font-weight: 600; }}
     table a {{ color: var(--accent); }}
+    table tr.you td {{ color: var(--accent); }}
+    #results.hidden, #loading.hidden {{ display: none; }}
+    #loading {{
+      margin: 22px 0; padding: 28px 22px; border-radius: 16px;
+      background: var(--card); border: 1px solid #2c3947; text-align: center;
+    }}
+    .spinner {{
+      width: 42px; height: 42px; margin: 0 auto 16px; border-radius: 50%;
+      border: 3px solid #2c3947; border-top-color: var(--accent);
+      animation: spin 0.8s linear infinite;
+    }}
+    @keyframes spin {{ to {{ transform: rotate(360deg); }} }}
+    #loading h2 {{ margin: 0 0 8px; font-size: 1.15rem; }}
+    #loading p {{ color: var(--muted); margin: 0 0 18px; }}
+    .pulse {{
+      display: grid; gap: 8px; max-width: 420px; margin: 0 auto;
+    }}
+    .pulse i {{
+      display: block; height: 12px; border-radius: 8px;
+      background: linear-gradient(90deg, #243044 25%, #3a4a5c 50%, #243044 75%);
+      background-size: 200% 100%;
+      animation: shimmer 1.2s ease-in-out infinite;
+    }}
+    .pulse i:nth-child(1) {{ width: 100%; }}
+    .pulse i:nth-child(2) {{ width: 86%; animation-delay: 0.1s; }}
+    .pulse i:nth-child(3) {{ width: 72%; animation-delay: 0.2s; }}
+    .pulse i:nth-child(4) {{ width: 92%; animation-delay: 0.3s; }}
+    @keyframes shimmer {{
+      0% {{ background-position: 100% 0; }}
+      100% {{ background-position: -100% 0; }}
+    }}
+    #loading-step {{ color: var(--accent); font-weight: 600; min-height: 1.4em; }}
     @media (max-width: 640px) {{ .grid {{ grid-template-columns: 1fr; }} }}
   </style>
 </head>
@@ -160,10 +204,9 @@ def _page(
   <main>
     <nav><a href="/compare">Compare one</a><a href="/automate">Automate catalog</a></nav>
     <h1>Compare a product price</h1>
-    <p class="lede">Paste your storefront product link. Leave the competitor box empty
-    and we will search the web for the same item (Daraz, Telemart, PriceOye, and other shops),
-    then compare every listing that looks like a real match. Or paste a competitor URL to skip search.</p>
-    <form method="post" action="/compare" onsubmit="this.querySelector('button').disabled=true; this.querySelector('button').textContent='Searching the web…';">
+    <p class="lede">Paste your storefront product link and leave the competitor box empty.
+    We search the web and compare the top shops (Daraz, Smart Accessories, Apricot, ShoppersPk, and others) — one listing per shop, cheapest first.</p>
+    <form method="post" action="/compare" onsubmit="return startCompare(this);">
       <div>
         <label>Your product link
           <input name="storefront_url" required placeholder="https://www.sadiq.ai/product-details/..." value="{_esc(ours)}"/>
@@ -176,11 +219,45 @@ def _page(
       </div>
       <button type="submit">Find matches and compare</button>
     </form>
+    <div id="loading" class="hidden" aria-live="polite">
+      <div class="spinner" aria-hidden="true"></div>
+      <h2>Comparing prices across shops</h2>
+      <p id="loading-step">Searching the web for the same product…</p>
+      <div class="pulse" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+    </div>
+    <div id="results">
     {banner}
     {cards}
+    </div>
     <p><a class="docs" href="/automate">Need to do 5,000 products?</a>
     · <a class="docs" href="/docs">API docs</a></p>
   </main>
+  <script>
+    function startCompare(form) {{
+      var btn = form.querySelector("button");
+      btn.disabled = true;
+      btn.textContent = "Comparing…";
+      var results = document.getElementById("results");
+      var loading = document.getElementById("loading");
+      if (results) results.classList.add("hidden");
+      if (loading) loading.classList.remove("hidden");
+      var steps = [
+        "Searching the web for the same product…",
+        "Checking Daraz…",
+        "Checking Smart Accessories…",
+        "Checking Apricot and ShoppersPk…",
+        "Reading prices and matching titles…",
+        "Building your comparison…"
+      ];
+      var i = 0;
+      var el = document.getElementById("loading-step");
+      setInterval(function () {{
+        i = (i + 1) % steps.length;
+        if (el) el.textContent = steps[i];
+      }}, 2800);
+      return true;
+    }}
+  </script>
 </body>
 </html>"""
 

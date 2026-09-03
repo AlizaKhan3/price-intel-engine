@@ -9,6 +9,7 @@ SADIQ_PAIR = re.compile(
     r"/product-details/[^/]+/([a-fA-F0-9]{24})-([a-fA-F0-9]{24})",
     re.I,
 )
+SADIQ_SLUG = re.compile(r"/product-details/([^/]+)/", re.I)
 SADIQ_SINGLE = re.compile(r"/product(?:-details)?/([a-fA-F0-9]{24})/?$", re.I)
 
 HOST_ALIASES = {
@@ -30,6 +31,24 @@ HOST_ALIASES = {
     "www.goto.com.pk": "goto",
     "yayvo.com": "yayvo",
     "www.yayvo.com": "yayvo",
+    "homegadgets.pk": "homegadgets",
+    "www.homegadgets.pk": "homegadgets",
+    "metrocity.pk": "metrocity",
+    "www.metrocity.pk": "metrocity",
+    "thegadgetsgallery.com": "gadgetsgallery",
+    "www.thegadgetsgallery.com": "gadgetsgallery",
+    "esentiments.pk": "esentiments",
+    "www.esentiments.pk": "esentiments",
+    "smartaccessories.pk": "smartaccessories",
+    "www.smartaccessories.pk": "smartaccessories",
+    "apricot.com.pk": "apricot",
+    "www.apricot.com.pk": "apricot",
+    "shopperspk.com": "shopperspk",
+    "www.shopperspk.com": "shopperspk",
+    "homducts.pk": "homducts",
+    "www.homducts.pk": "homducts",
+    "kiswa.pk": "kiswa",
+    "www.kiswa.pk": "kiswa",
 }
 
 
@@ -48,6 +67,11 @@ def product_id_from_storefront_url(url: str) -> str:
         "Could not read a product id from that storefront URL. "
         "Use a product-details link like .../product-details/name/{groupId}-{productId}"
     )
+
+
+def slug_from_storefront_url(url: str) -> str | None:
+    match = SADIQ_SLUG.search(url or "")
+    return match.group(1) if match else None
 
 
 def competitor_from_url(url: str) -> str:
@@ -72,5 +96,14 @@ def competitor_label(slug: str) -> str:
         "shophive": "Shophive",
         "goto": "Goto",
         "yayvo": "Yayvo",
+        "homegadgets": "HomeGadgets",
+        "metrocity": "MetroCity",
+        "gadgetsgallery": "Gadgets Gallery",
+        "esentiments": "Esentiments",
+        "smartaccessories": "Smart Accessories",
+        "apricot": "Apricot",
+        "shopperspk": "ShoppersPk",
+        "homducts": "Homducts",
+        "kiswa": "Kiswa",
     }
     return names.get(slug, slug.replace("-", " ").title())

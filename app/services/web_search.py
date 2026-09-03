@@ -30,10 +30,45 @@ def search_web(query: str, max_results: int = 8) -> list[dict]:
     if settings.GOOGLE_CSE_ID and settings.GOOGLE_CSE_KEY:
         return _google_cse(query, max_results, settings.GOOGLE_CSE_ID, settings.GOOGLE_CSE_KEY)
     try:
-        return _ddgs(query, max_results)
+        items = _ddgs(query, max_results)
     except Exception as exc:
         logger.warning("DuckDuckGo package search failed (%s); using HTML fallback", exc)
-        return _duckduckgo_html(query, max_results)
+        items = []
+    if len(items) < 2:
+        items = _merge(items, _duckduckgo_html(query, max_results))
+    if len(items) < 2:
+        items = _merge(items, _bing_html(query, max_results))
+    return items[:max_results]
+
+
+def shopify_products(host: str, query: str, limit: int = 3) -> list[dict]:
+    """Public Shopify storefront suggest — used to find a product page on a known shop."""
+    try:
+        response = httpx.get(
+            f"https://{host}/search/suggest.json",
+            params={"q": query, "resources[type]": "product", "resources[limit]": limit},
+            headers={"User-Agent": SEARCH_UA},
+            timeout=12,
+            follow_redirects=True,
+        )
+        if response.status_code != 200:
+            return []
+        products = (
+            ((response.json().get("resources") or {}).get("results") or {}).get("products")
+            or []
+        )
+    except Exception:
+        return []
+    items = []
+    for product in products:
+        path = product.get("url") or ""
+        if not path and product.get("handle"):
+            path = f"/products/{product['handle']}"
+        if not path:
+            continue
+        url = path if path.startswith("http") else f"https://{host}{path}"
+        items.append({"title": product.get("title") or "", "url": url})
+    return items
 
 
 def search_provider() -> str:
@@ -80,8 +115,15 @@ def _ddgs(query: str, max_results: int) -> list[dict]:
     from ddgs import DDGS
 
     items = []
-    with DDGS() as client:
-        for row in client.text(query, region="pk-en", max_results=max_results) or []:
+    # Yahoo respects site: and Pakistan queries. The DuckDuckGo engine crashes on
+    # Python 3.9 TLS 1.3 and the HTML fallback often ignores site: filters.
+    with DDGS(verify=False) as client:
+        for row in client.text(
+            query,
+            region="pk-en",
+            max_results=max_results,
+            backend="yahoo",
+        ) or []:
             url = row.get("href") or row.get("url")
             if url:
                 items.append({"title": row.get("title") or "", "url": url})
@@ -110,6 +152,44 @@ def _duckduckgo_html(query: str, max_results: int) -> list[dict]:
         if len(items) >= max_results:
             break
     return items
+
+
+def _bing_html(query: str, max_results: int) -> list[dict]:
+    try:
+        response = httpx.get(
+            "https://www.bing.com/search",
+            params={"q": query, "cc": "PK", "setlang": "en"},
+            headers={"User-Agent": SEARCH_UA},
+            timeout=20,
+            follow_redirects=True,
+        )
+        response.raise_for_status()
+    except Exception:
+        logger.warning("Bing HTML search failed")
+        return []
+    items = []
+    seen = set()
+    for match in re.finditer(r'<h2[^>]*>\s*<a[^>]+href="(https?://[^"]+)"[^>]*>(.*?)</a>', response.text, re.I | re.S):
+        url = unescape(match.group(1)).split("&")[0]
+        if url in seen or "microsoft.com" in url or "bing.com" in url:
+            continue
+        seen.add(url)
+        title = re.sub(r"<[^>]+>", "", unescape(match.group(2))).strip()
+        items.append({"title": title, "url": url})
+        if len(items) >= max_results:
+            break
+    return items
+
+
+def _merge(left: list[dict], right: list[dict]) -> list[dict]:
+    seen = {(row.get("url") or "").split("#")[0] for row in left}
+    merged = list(left)
+    for row in right:
+        url = (row.get("url") or "").split("#")[0]
+        if url and url not in seen:
+            seen.add(url)
+            merged.append(row)
+    return merged
 
 
 def _unwrap_ddg(url: str) -> str:

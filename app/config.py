@@ -81,12 +81,15 @@ class Settings(BaseSettings):
     GOOGLE_CSE_ID: str = ""
     GOOGLE_CSE_KEY: str = ""
     DISCOVERY_SITES: str = (
-        "daraz.pk,telemart.pk,ishopping.pk,priceoye.pk,shophive.com,"
-        "alfatah.pk,goto.com.pk,yayvo.com"
+        "homducts.pk,daraz.pk,smartaccessories.pk,apricot.com.pk,"
+        "shopperspk.com,telemart.pk,kiswa.pk"
     )
     DISCOVERY_OPEN_WEB: bool = True
-    DISCOVERY_MAX_URLS: int = 8
+    DISCOVERY_MAX_URLS: int = 6
+    DISCOVERY_PER_HOST: int = 1
     DISCOVERY_MIN_SCORE: int = 70
+    DISCOVERY_PRICE_MIN_RATIO: float = 0.5
+    DISCOVERY_PRICE_MAX_RATIO: float = 2.5
 
     # --- API ---
     API_CORS_ORIGINS: str = "*"
