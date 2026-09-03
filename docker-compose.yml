@@ -1,0 +1,18 @@
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  # Optional local Mongo if you do not want to use the remote cluster for
+  # PriceIntel's own database. Start with: docker compose --profile local-mongo up -d
+  mongo:
+    profiles: ["local-mongo"]
+    image: mongo:7
+    ports:
+      - "27018:27017"
+    volumes:
+      - mongo_data:/data/db
+
+volumes:
+  mongo_data:
