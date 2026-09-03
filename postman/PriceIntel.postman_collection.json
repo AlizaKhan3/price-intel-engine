@@ -1,0 +1,450 @@
+{
+  "info": {
+    "name": "PriceIntel API",
+    "description": "# PriceIntel — Price Intelligence Engine\n\nCompare your marketplace catalog against competitors, track price history, get alerts.\n\n## How to use this collection\n\n### Step 1: Set variables\nGo to **Variables** tab (on this collection) and set:\n- `base_url` → `http://127.0.0.1:8000` (already set)\n- `tenant_api_key` → your `TENANT_API_KEY` from `.env`\n- `admin_api_key` → your `ADMIN_API_KEY` from `.env`\n\n### Step 2: Run requests in this order\n1. **Health** → confirm server is up\n2. **Who am I** → confirm your API key works\n3. **Sync Catalog (200 products)** → pull products from your DB\n4. **Catalog Sync Status** → wait until status=done\n5. **List Products** → see your synced products\n6. **Recompute Comparisons** → find price gaps\n7. **List Comparisons** → see which sellers are cheaper\n\n### What is a product_id?\nEvery product in your MongoDB has an `_id` like `64e4a35038023b2b950bf30c`. That hex string IS the product_id in PriceIntel.\n\n### What is a group_id?\nProducts that are the SAME item sold by different sellers share a `group_id`. Example: \"Perfume\" sold by Seller A at Rs.2875 and Seller B at Rs.2500 have the same group_id.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{tenant_api_key}}",
+        "type": "string"
+      }
+    ]
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://127.0.0.1:8000",
+      "type": "string"
+    },
+    {
+      "key": "tenant_api_key",
+      "value": "PASTE_YOUR_TENANT_API_KEY_HERE",
+      "type": "string"
+    },
+    {
+      "key": "admin_api_key",
+      "value": "PASTE_YOUR_ADMIN_API_KEY_HERE",
+      "type": "string"
+    },
+    {
+      "key": "product_id",
+      "value": "64e4a35038023b2b950bf30c",
+      "type": "string"
+    },
+    {
+      "key": "group_id",
+      "value": "65bcdfda10e5fea83eac4339",
+      "type": "string"
+    },
+    {
+      "key": "match_id",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "alert_id",
+      "value": "",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "① Setup — Run These First",
+      "description": "Run these in order. Each one prepares data for the next step.",
+      "item": [
+        {
+          "name": "1. Health Check (no auth needed)",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "GET",
+            "url": "{{base_url}}/health",
+            "description": "Confirm the server is running. No API key needed.\n\nExpected: `{ \"status\": \"ok\" }`"
+          }
+        },
+        {
+          "name": "2. Who Am I (verify API key)",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/v1/me",
+            "description": "Verify your API key works. You should see your tenant name and slug.\n\nIf you get 401 Unauthorized → your tenant_api_key variable is wrong."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('API key valid', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "console.log('Tenant:', body.slug, body.name);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "3. Sync Catalog (first 200 products)",
+          "request": {
+            "method": "POST",
+            "url": {
+              "raw": "{{base_url}}/v1/catalog/sync?wait=true&limit=200",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "catalog", "sync"],
+              "query": [
+                { "key": "wait", "value": "true", "description": "true = wait for result. false = run in background." },
+                { "key": "limit", "value": "200", "description": "Only sync 200 products for a quick test. Remove to sync all ~14k." }
+              ]
+            },
+            "description": "Pulls products from your MongoDB into PriceIntel.\n\n**First time:** Use limit=200 and wait=true (takes ~10 seconds).\n**Full sync:** Remove limit, set wait=false (takes minutes, runs in background).\n\nAfter this, products are available in GET /v1/products."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const body = pm.response.json();",
+                  "if (body.products_synced) {",
+                  "  console.log('Synced', body.products_synced, 'products,', body.group_matches_upserted, 'group matches');",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "4. Check Sync Status",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/v1/catalog/status",
+            "description": "Check if catalog sync is done.\n\n- `running` → still pulling products\n- `done` → finished, check products_in_cache\n- `never_run` → you haven't synced yet"
+          }
+        },
+        {
+          "name": "5. Recompute Comparisons",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/v1/comparisons/recompute",
+            "description": "Compares prices across sellers in your catalog.\n\nProducts with the same group_id are compared automatically.\nPositive gap_pct = you are more expensive than the cheapest seller.\n\nRun this AFTER catalog sync is done."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const body = pm.response.json();",
+                  "console.log('Comparisons computed:', body.comparisons_computed);"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "② Products — Browse Your Catalog",
+      "description": "After sync, your products are here. Use these to explore.",
+      "item": [
+        {
+          "name": "List All Products",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/v1/products?limit=10&skip=0",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "products"],
+              "query": [
+                { "key": "limit", "value": "10", "description": "How many to return (1-200)" },
+                { "key": "skip", "value": "0", "description": "Offset for pagination" },
+                { "key": "q", "value": "", "description": "Search product title (e.g. Perfume, Earbuds)", "disabled": true },
+                { "key": "category", "value": "", "description": "Filter by category name (e.g. Fragrances, Skincare)", "disabled": true },
+                { "key": "marketplace", "value": "", "description": "Filter by marketplace/seller name", "disabled": true },
+                { "key": "group_id", "value": "", "description": "Show all sellers of one product", "disabled": true },
+                { "key": "active", "value": "true", "description": "true = in-stock/active only", "disabled": true }
+              ]
+            },
+            "description": "Browse synced products. All filters are optional.\n\n**Examples:**\n- Search by name: enable `q` and type `Perfume`\n- Active products only: enable `active` = `true`\n- Specific category: enable `category` = `Fragrances`\n- Page 2: set `skip` = `10`"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const body = pm.response.json();",
+                  "console.log('Total products:', body.total);",
+                  "if (body.items && body.items.length > 0) {",
+                  "  const p = body.items[0];",
+                  "  pm.collectionVariables.set('product_id', p.id);",
+                  "  if (p.group_id) pm.collectionVariables.set('group_id', p.group_id);",
+                  "  console.log('Saved product_id:', p.id, 'group_id:', p.group_id);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Search Products (by title)",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/v1/products?q=Perfume&limit=10",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "products"],
+              "query": [
+                { "key": "q", "value": "Perfume" },
+                { "key": "limit", "value": "10" }
+              ]
+            },
+            "description": "Search by product title. Change `q` to search for anything:\n- `Perfume`\n- `Earbuds`\n- `Lawn`\n- `Oil`"
+          }
+        },
+        {
+          "name": "Get One Product (by _id from your DB)",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/v1/products/{{product_id}}",
+            "description": "Get a single product by its MongoDB _id.\n\n**How to use:** Copy any `_id` from your MongoDB Compass and paste it as `product_id`.\n\nExample: `64e4a35038023b2b950bf30c` (the Perfume product)\n\nThe `product_id` variable is auto-set when you run 'List All Products'."
+          }
+        },
+        {
+          "name": "View Product Group (same item, different sellers)",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/v1/groups/{{group_id}}",
+            "description": "Shows all listings of the SAME product across different sellers/marketplaces.\n\nReturns min_price, max_price, and every seller's price side by side.\n\n**How to use:** Copy `group_id` from any product response.\n\nExample: `65bcdfda10e5fea83eac4339`"
+          }
+        }
+      ]
+    },
+    {
+      "name": "③ Comparisons — Who Is Cheaper?",
+      "description": "After recompute, see price gaps between sellers.",
+      "item": [
+        {
+          "name": "List All Comparisons (biggest gap first)",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/v1/comparisons?limit=20",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "comparisons"],
+              "query": [
+                { "key": "limit", "value": "20" },
+                { "key": "min_gap_pct", "value": "5", "description": "Only show gaps ≥ 5%", "disabled": true },
+                { "key": "competitor", "value": "", "description": "Filter by competitor/marketplace name", "disabled": true }
+              ]
+            },
+            "description": "Price comparisons sorted by largest gap first.\n\n**Reading the result:**\n- `gap_pct` = how much more expensive this listing is vs the cheapest\n- Positive number = this seller charges more\n- `our_price` vs `competitor_price` = the actual prices\n- `source: catalog_group` = compared within your own catalog (same group_id)"
+          }
+        },
+        {
+          "name": "Comparisons with ≥5% Gap Only",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/v1/comparisons?min_gap_pct=5&limit=20",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "comparisons"],
+              "query": [
+                { "key": "min_gap_pct", "value": "5" },
+                { "key": "limit", "value": "20" }
+              ]
+            },
+            "description": "Only products where the price gap is 5% or more."
+          }
+        },
+        {
+          "name": "Price History for a Product",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/v1/comparisons/{{product_id}}/history?days=30",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "comparisons", "{{product_id}}", "history"],
+              "query": [
+                { "key": "days", "value": "30", "description": "How far back (1-365 days)" }
+              ]
+            },
+            "description": "Price snapshots over time for trend charts.\n\nWill be empty until you've run recompute multiple times (it records a snapshot each time)."
+          }
+        }
+      ]
+    },
+    {
+      "name": "④ Matches — Review Queue",
+      "description": "When external scrapers find competitor listings, fuzzy matches land here for human review.",
+      "item": [
+        {
+          "name": "Pending Matches (review queue)",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/v1/matches/pending?limit=20",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "matches", "pending"],
+              "query": [
+                { "key": "limit", "value": "20" }
+              ]
+            },
+            "description": "Candidate product matches awaiting human review.\n\nEach item shows your product + the competitor listing + confidence score.\n- confidence ≥ 92 → auto-approved (you won't see these here)\n- confidence 60–91 → needs your review\n\n**Empty?** That's normal until you run external scrapers (Daraz etc.)."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const body = pm.response.json();",
+                  "if (body.items && body.items.length > 0) {",
+                  "  pm.collectionVariables.set('match_id', body.items[0].match_id);",
+                  "  console.log('Saved match_id:', body.items[0].match_id);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Approve a Match",
+          "request": {
+            "method": "POST",
+            "url": {
+              "raw": "{{base_url}}/v1/matches/{{match_id}}/approve?reviewed_by=postman",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "matches", "{{match_id}}", "approve"],
+              "query": [
+                { "key": "reviewed_by", "value": "postman" }
+              ]
+            },
+            "description": "Approve a pending match. After approval it will be used in price comparisons.\n\n`match_id` is auto-set when you run 'Pending Matches'."
+          }
+        },
+        {
+          "name": "Reject a Match",
+          "request": {
+            "method": "POST",
+            "url": {
+              "raw": "{{base_url}}/v1/matches/{{match_id}}/reject?reviewed_by=postman",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "matches", "{{match_id}}", "reject"],
+              "query": [
+                { "key": "reviewed_by", "value": "postman" }
+              ]
+            },
+            "description": "Reject a bad match so it's never used in comparisons."
+          }
+        }
+      ]
+    },
+    {
+      "name": "⑤ Alerts — Price Drop Notifications",
+      "description": "Alerts fire when a competitor/seller is cheaper by ≥ 5% (configurable).",
+      "item": [
+        {
+          "name": "Unacknowledged Alerts",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/v1/alerts?acknowledged=false&limit=20",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "alerts"],
+              "query": [
+                { "key": "acknowledged", "value": "false" },
+                { "key": "limit", "value": "20" }
+              ]
+            },
+            "description": "Alerts you haven't seen yet. Each shows:\n- Which product\n- Which competitor/marketplace is cheaper\n- By how much (gap_pct)\n\nRun 'Recompute Comparisons' first to generate alerts."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const body = pm.response.json();",
+                  "if (body.items && body.items.length > 0) {",
+                  "  pm.collectionVariables.set('alert_id', body.items[0].id);",
+                  "  console.log('Saved alert_id:', body.items[0].id);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Acknowledge an Alert",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/v1/alerts/{{alert_id}}/acknowledge",
+            "description": "Mark an alert as seen so it stops appearing in unacknowledged list.\n\n`alert_id` is auto-set when you run 'Unacknowledged Alerts'."
+          }
+        }
+      ]
+    },
+    {
+      "name": "⑥ Admin — Onboard New Customers",
+      "description": "Platform admin only. Uses X-Admin-Key, not the tenant API key.",
+      "item": [
+        {
+          "name": "List All Tenants",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "GET",
+            "url": "{{base_url}}/v1/admin/tenants",
+            "header": [
+              { "key": "X-Admin-Key", "value": "{{admin_api_key}}" }
+            ],
+            "description": "List all onboarded marketplace customers.\n\nUses X-Admin-Key header (not the tenant Bearer token)."
+          }
+        },
+        {
+          "name": "Onboard a New Customer",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "url": "{{base_url}}/v1/admin/tenants",
+            "header": [
+              { "key": "X-Admin-Key", "value": "{{admin_api_key}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"slug\": \"acme-market\",\n  \"name\": \"Acme Market\",\n  \"storefront_base_url\": \"https://www.acme.example\",\n  \"competitors\": [\"daraz\"],\n  \"catalog\": {\n    \"source\": \"mongodb\",\n    \"mongo_uri\": \"mongodb://readonly:PASSWORD@host:27017/?authSource=admin\",\n    \"db_name\": \"acme_db\",\n    \"products_collection\": \"products\",\n    \"categories_collection\": \"categories\",\n    \"marketplaces_collection\": \"marketplaces\",\n    \"product_groups_collection\": \"productgroups\",\n    \"product_url_template\": \"https://www.acme.example/product/{id}\",\n    \"field_map\": {\n      \"title\": [\"name\", \"title\"],\n      \"price\": [\"after_discount\", \"price\"],\n      \"image_url\": [\"thumbnail\", \"image\"],\n      \"category_id\": \"category\",\n      \"group_id\": \"group_id\"\n    }\n  },\n  \"matching\": {\n    \"min_score\": 60,\n    \"auto_approve_score\": 92\n  },\n  \"alerts\": {\n    \"email_to\": \"pricing@acme.example\",\n    \"price_gap_pct\": 5.0\n  }\n}"
+            },
+            "description": "Create a new tenant. The response includes an `api_key` — give that to the customer. PriceIntel only stores a hash, so save it now.\n\n**Edit the JSON body** with the customer's real MongoDB URI and field names."
+          }
+        }
+      ]
+    },
+    {
+      "name": "⑦ Full Sync (all products)",
+      "description": "Run this after the smoke test works.",
+      "item": [
+        {
+          "name": "Sync Full Catalog (background)",
+          "request": {
+            "method": "POST",
+            "url": {
+              "raw": "{{base_url}}/v1/catalog/sync?wait=false",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "catalog", "sync"],
+              "query": [
+                { "key": "wait", "value": "false" }
+              ]
+            },
+            "description": "Sync ALL products (no limit). Runs in background.\n\nCheck progress with 'Check Sync Status'.\nFor ~14k products on a remote cluster this takes 2-5 minutes."
+          }
+        },
+        {
+          "name": "Check Sync Status",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/v1/catalog/status",
+            "description": "Poll this until status = `done`."
+          }
+        }
+      ]
+    }
+  ]
+}
