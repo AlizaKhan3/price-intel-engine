@@ -22,6 +22,14 @@ HOST_ALIASES = {
     "www.amazon.com": "amazon",
     "alfatah.pk": "alfatah",
     "www.alfatah.pk": "alfatah",
+    "priceoye.pk": "priceoye",
+    "www.priceoye.pk": "priceoye",
+    "shophive.com": "shophive",
+    "www.shophive.com": "shophive",
+    "goto.com.pk": "goto",
+    "www.goto.com.pk": "goto",
+    "yayvo.com": "yayvo",
+    "www.yayvo.com": "yayvo",
 }
 
 
@@ -60,5 +68,9 @@ def competitor_label(slug: str) -> str:
         "ishopping": "iShopping",
         "amazon": "Amazon",
         "alfatah": "Alfatah",
+        "priceoye": "PriceOye",
+        "shophive": "Shophive",
+        "goto": "Goto",
+        "yayvo": "Yayvo",
     }
     return names.get(slug, slug.replace("-", " ").title())

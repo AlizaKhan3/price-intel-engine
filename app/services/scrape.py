@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 """Scrape one competitor product page and attach it to one of your products."""
+import asyncio
 import logging
 from datetime import datetime
 
+from app.config import get_settings
 from app.db import get_priceintel_db
+from app.models.product import CompetitorListing
 from app.models.product import MatchStatus, MatchTier
 from app.scrapers.registry import get_scraper
 from app.services.catalog_sync import sync_full_catalog
@@ -14,6 +17,43 @@ from app.services.tenants import tenant_id as tid
 from app.services.urls import competitor_from_url, competitor_label, product_id_from_storefront_url
 
 logger = logging.getLogger(__name__)
+
+
+async def fetch_competitor_listing(competitor: str, competitor_url: str) -> CompetitorListing:
+    rows = await fetch_competitor_listings([(competitor, competitor_url)])
+    _, listing, error = rows[0]
+    if listing is None:
+        raise RuntimeError(
+            error
+            or "Could not read title/price from that competitor page. Try another product URL."
+        )
+    return listing
+
+
+async def fetch_competitor_listings(
+    pairs: list[tuple[str, str]],
+) -> list[tuple[str, CompetitorListing | None, str | None]]:
+    """Open one browser and fetch many product pages."""
+    from playwright.async_api import async_playwright
+
+    settings = get_settings()
+    results: list[tuple[str, CompetitorListing | None, str | None]] = []
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page(user_agent=settings.SCRAPER_USER_AGENT)
+        try:
+            for i, (competitor, url) in enumerate(pairs):
+                try:
+                    listing = await get_scraper(competitor).fetch_product(page, url)
+                    results.append((url, listing, None if listing else "No title/price on that page"))
+                except Exception as exc:
+                    logger.warning("Fetch failed %s: %s", url, exc)
+                    results.append((url, None, str(exc)))
+                if i < len(pairs) - 1:
+                    await asyncio.sleep(settings.SCRAPER_REQUEST_DELAY_SECONDS)
+        finally:
+            await browser.close()
+    return results
 
 
 async def compare_storefront_and_competitor(
@@ -56,24 +96,28 @@ async def scrape_product_url(
             f"Product {product_id} was not found in the catalog database. Check the storefront URL."
         )
 
-    scraper = get_scraper(competitor)
-    from playwright.async_api import async_playwright
-    from app.config import get_settings
+    listing = await fetch_competitor_listing(competitor, competitor_url)
+    return await attach_listing(
+        tenant,
+        product,
+        listing,
+        auto_approve=auto_approve,
+        storefront_url=storefront_url,
+        competitor=competitor,
+    )
 
-    settings = get_settings()
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        page = await browser.new_page(user_agent=settings.SCRAPER_USER_AGENT)
-        try:
-            listing = await scraper.fetch_product(page, competitor_url)
-        finally:
-            await browser.close()
 
-    if listing is None:
-        raise RuntimeError(
-            "Could not read title/price from that competitor page. Try another product URL."
-        )
-
+async def attach_listing(
+    tenant: dict,
+    product: dict,
+    listing: CompetitorListing,
+    *,
+    auto_approve: bool = False,
+    storefront_url: str | None = None,
+    competitor: str | None = None,
+) -> dict:
+    db = get_priceintel_db()
+    tenant_key = tid(tenant)
     payload = listing.model_dump()
     payload["tenant_id"] = tenant_key
     payload["category"] = product.get("category")

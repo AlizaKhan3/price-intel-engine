@@ -87,7 +87,39 @@ curl -s 'http://localhost:8000/v1/comparisons?min_gap_pct=5' -H "Authorization: 
 The first sync already produces comparisons for products that share
 `group_id` across marketplaces in the catalog — no scraper required.
 
-### 6. Background jobs (after the first sync works)
+### 6. Automate thousands of products
+
+Paste **your** product link. Competitor URLs are optional.
+
+1. Open http://localhost:8000/compare
+2. Paste a Sadiq product-details URL
+3. Leave the competitor box empty → **Find matches and compare**
+
+PriceIntel searches the web for the same title, keeps product pages
+(Daraz `/products/…`, Telemart, PriceOye, and other shops), then compares
+prices. Weak title matches and crazy price outliers are dropped.
+
+For a batch, use `/automate` or:
+
+```bash
+curl -s -X POST http://localhost:8000/v1/automation/discover \
+  -H "Authorization: Bearer $KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"storefront_url":"https://www.sadiq.ai/product-details/..."}'
+```
+
+DuckDuckGo is the default search backend (no API key). Add `SERPER_API_KEY`
+or Google CSE keys in `.env` if results look thin. Searching 5,000 SKUs
+overnight is a Celery job, not a single button — one product takes ~30–60s.
+
+CSV import (`unmapped.csv`) is still available when search misses a shop.
+
+```bash
+curl -s http://localhost:8000/v1/automation/coverage -H "Authorization: Bearer $KEY"
+curl -s http://localhost:8000/v1/automation/unmapped.csv -H "Authorization: Bearer $KEY" -o unmapped.csv
+```
+
+### 7. Background jobs (after the first sync works)
 
 ```bash
 celery -A app.tasks.celery_app worker --loglevel=info

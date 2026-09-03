@@ -76,6 +76,18 @@ class Settings(BaseSettings):
     SCRAPER_USER_AGENT: str = "PriceIntelBot/1.0 (+mailto:info@sadiq.ai)"
     ENABLED_COMPETITORS: str = "daraz"
 
+    # --- Auto-discovery (web search → product pages, never marketplace search pages) ---
+    SERPER_API_KEY: str = ""
+    GOOGLE_CSE_ID: str = ""
+    GOOGLE_CSE_KEY: str = ""
+    DISCOVERY_SITES: str = (
+        "daraz.pk,telemart.pk,ishopping.pk,priceoye.pk,shophive.com,"
+        "alfatah.pk,goto.com.pk,yayvo.com"
+    )
+    DISCOVERY_OPEN_WEB: bool = True
+    DISCOVERY_MAX_URLS: int = 8
+    DISCOVERY_MIN_SCORE: int = 70
+
     # --- API ---
     API_CORS_ORIGINS: str = "*"
     CATALOG_SYNC_ACTIVE_ONLY: bool = False
@@ -92,6 +104,10 @@ class Settings(BaseSettings):
     @property
     def enabled_competitors(self) -> list[str]:
         return [item.strip() for item in self.ENABLED_COMPETITORS.split(",") if item.strip()]
+
+    @property
+    def discovery_sites(self) -> list[str]:
+        return [item.strip() for item in self.DISCOVERY_SITES.split(",") if item.strip()]
 
 
 @lru_cache

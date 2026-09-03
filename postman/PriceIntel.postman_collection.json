@@ -484,6 +484,68 @@
           }
         }
       ]
+    },
+    {
+      "name": "⑨ Automate catalog (bulk + refresh)",
+      "description": "Do not paste 5,000 storefront URLs. Sync the catalog, download unmapped.csv, fill competitor product-page URLs, import in batches, then refresh.",
+      "item": [
+        {
+          "name": "Coverage",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/v1/automation/coverage",
+            "description": "How many active products already have a saved competitor URL."
+          }
+        },
+        {
+          "name": "List unmapped products",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/v1/automation/unmapped?limit=50",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "automation", "unmapped"],
+              "query": [{ "key": "limit", "value": "50" }]
+            }
+          }
+        },
+        {
+          "name": "Download unmapped CSV",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/v1/automation/unmapped.csv",
+            "description": "Fill competitor_url, then send the file contents to Bulk import mappings."
+          }
+        },
+        {
+          "name": "Bulk import mappings",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"mappings\": \"product_id,competitor_url\\n{{product_id}},{{competitor_url}}\"\n}"
+            },
+            "url": "{{base_url}}/v1/automation/bulk",
+            "description": "Up to 100 rows per request. Use a Daraz /products/ URL, not a search URL."
+          }
+        },
+        {
+          "name": "Refresh saved competitor prices",
+          "request": {
+            "method": "POST",
+            "url": {
+              "raw": "{{base_url}}/v1/automation/refresh?wait=false&limit=50",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "automation", "refresh"],
+              "query": [
+                { "key": "wait", "value": "false" },
+                { "key": "limit", "value": "50" }
+              ]
+            }
+          }
+        }
+      ]
     }
   ]
 }

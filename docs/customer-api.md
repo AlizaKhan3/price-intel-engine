@@ -228,6 +228,59 @@ Time series of recorded prices for charts.
 
 ---
 
+### Automation (thousands of products)
+
+Your catalog is synced from Mongo — you do **not** paste 5,000 storefront URLs.
+The bottleneck is finding matching product pages on other shops.
+`POST /v1/automation/discover` searches the web (not Daraz `/catalog/`)
+and compares every listing that looks like the same product.
+
+#### `POST /v1/automation/discover`
+
+Body: `{ "storefront_url": "https://www.sadiq.ai/product-details/..." }`
+or `{ "product_id": "..." }`.
+
+Searches the web, fetches product pages, drops weak title/price mismatches,
+returns a comparison per match.
+
+#### `POST /v1/automation/discover-unmapped?limit=1`
+
+Same, for the next few unmapped catalog products.
+
+#### `GET /v1/automation/coverage`
+
+How many active products already have an external competitor URL.
+
+#### `GET /v1/automation/unmapped`
+
+Active products with no scrape mapping yet. Query: `limit`, `skip`.
+
+#### `GET /v1/automation/unmapped.csv`
+
+Same list as a spreadsheet. Fill the last column (`competitor_url`) and send
+it back to `/v1/automation/bulk`.
+
+#### `POST /v1/automation/bulk`
+
+Body:
+
+```json
+{
+  "mappings": "product_id,competitor_url\n6a822de15d1f9b7f071f2cfa,https://www.daraz.pk/products/..."
+}
+```
+
+A downloaded `unmapped.csv` with `competitor_url` filled in also works.
+Max 100 rows per request. `?wait=false` runs the import in the background.
+
+#### `POST /v1/automation/refresh?limit=50`
+
+Re-scrape saved competitor product pages and update prices.
+
+Browser UI (no API key): `/automate`.
+
+---
+
 ### Alerts
 
 An alert is created when a competitor is cheaper by at least your
@@ -316,3 +369,5 @@ Sadiq's live `products` collection is **read-only** from this service.
 | Version | Notes |
 |---|---|
 | 1.0.0 | Tenant API keys, catalog sync, group comparisons, match review, alerts |
+| 1.1.0 | Catalog automation: coverage, unmapped CSV, bulk URL import, scheduled refresh |
+| 1.2.0 | Web discovery: paste your product URL, search other shops, auto-compare |

@@ -17,6 +17,7 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from app.api import (
     routes_admin,
     routes_alerts,
+    routes_automation,
     routes_comparisons,
     routes_matches,
     routes_products,
@@ -94,6 +95,7 @@ app.include_router(routes_matches.router, prefix=v1)
 app.include_router(routes_comparisons.router, prefix=v1)
 app.include_router(routes_alerts.router, prefix=v1)
 app.include_router(routes_scrape.router, prefix=v1)
+app.include_router(routes_automation.router, prefix=v1)
 app.include_router(routes_admin.router, prefix=v1)
 
 

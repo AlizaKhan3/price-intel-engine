@@ -3,17 +3,69 @@ from __future__ import annotations
 from fastapi import APIRouter, Form
 from fastapi.responses import HTMLResponse
 
+from app.services import automation, discovery
 from app.services.scrape import compare_storefront_and_competitor
 from app.services.tenants import find_tenant_by_slug
 
 router = APIRouter(tags=["ui"])
 
 
-def _page(result: dict | None = None, error: str | None = None, ours: str = "", theirs: str = "") -> str:
+def _page(
+    result: dict | None = None,
+    error: str | None = None,
+    ours: str = "",
+    theirs: str = "",
+) -> str:
     banner = ""
     cards = ""
     if error:
         banner = f'<div class="banner err">{_esc(error)}</div>'
+    elif result and result.get("matches") is not None:
+        cheaper = result.get("cheaper")
+        tone = {"competitor": "warn", "us": "ok", "tie": "ok"}.get(cheaper, "ok")
+        if not result.get("matches"):
+            tone = "err"
+        banner = (
+            f'<div class="banner {tone}">'
+            f'<p class="head">{_esc(result.get("headline") or "")}</p>'
+            f'<p>{_esc(result.get("detail") or "")}</p>'
+            f"</div>"
+        )
+        ours_p = result.get("our_product") or {}
+        cards = f"""
+        <article class="solo">
+          <h3>Your listing</h3>
+          <p class="price">Rs. {_fmt(ours_p.get("price"))}</p>
+          <p class="muted">{_esc(ours_p.get("marketplace") or "Your store")}</p>
+          <p>{_esc(ours_p.get("title") or "")}</p>
+        </article>
+        """
+        rows = ""
+        for row in result.get("matches") or []:
+            listing = row.get("competitor_listing") or {}
+            rows += (
+                "<tr>"
+                f"<td>{_esc((listing.get('competitor') or '').title())}</td>"
+                f"<td>Rs. {_fmt(listing.get('price'))}</td>"
+                f"<td>{_esc(row.get('headline'))}</td>"
+                f"<td><a href='{_esc(listing.get('url'))}' target='_blank' rel='noreferrer'>Open</a></td>"
+                "</tr>"
+            )
+        if rows:
+            cards += (
+                "<table><thead><tr><th>Site</th><th>Their price</th><th>Result</th><th></th></tr></thead>"
+                f"<tbody>{rows}</tbody></table>"
+            )
+        skipped = result.get("skipped") or []
+        looked = result.get("searched_urls") or []
+        if looked:
+            cards += f"<p class='muted'>Looked at {len(looked)} product page(s).</p>"
+        if skipped:
+            cards += "<p class='muted'>Skipped " + str(len(skipped)) + " weak or unreadable pages.</p>"
+            cards += "<ul class='errs'>" + "".join(
+                f"<li>{_esc(s.get('reason'))}: {_esc((s.get('url') or '')[:80])}</li>"
+                for s in skipped[:6]
+            ) + "</ul>"
     elif result:
         cheaper = result.get("cheaper")
         tone = {"competitor": "warn", "us": "ok", "tie": "ok"}.get(cheaper, "ok")
@@ -89,35 +141,45 @@ def _page(result: dict | None = None, error: str | None = None, ours: str = "", 
     .err {{ background: #3a1518; border: 1px solid #a33; }}
     .grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }}
     article {{ background: var(--card); border: 1px solid #2c3947; border-radius: 14px; padding: 16px; }}
+    article.solo {{ margin: 18px 0; }}
     article h3 {{ margin: 0 0 8px; font-size: 0.9rem; color: var(--muted); font-weight: 600; }}
     .price {{ font-size: 1.6rem; font-weight: 700; margin: 0 0 6px; }}
     .muted {{ color: var(--muted); margin: 0 0 8px; font-size: 0.85rem; }}
     .diff {{ text-align: center; color: var(--accent); font-size: 1.05rem; }}
     a.docs {{ color: var(--muted); font-size: 0.85rem; }}
+    nav {{ margin: 0 0 18px; font-size: 0.9rem; }}
+    nav a {{ color: var(--accent); text-decoration: none; margin-right: 14px; }}
+    table {{ width: 100%; border-collapse: collapse; font-size: 0.88rem; margin: 16px 0; }}
+    th, td {{ text-align: left; padding: 8px 6px; border-bottom: 1px solid #2c3947; vertical-align: top; }}
+    th {{ color: var(--muted); font-weight: 600; }}
+    table a {{ color: var(--accent); }}
     @media (max-width: 640px) {{ .grid {{ grid-template-columns: 1fr; }} }}
   </style>
 </head>
 <body>
   <main>
+    <nav><a href="/compare">Compare one</a><a href="/automate">Automate catalog</a></nav>
     <h1>Compare a product price</h1>
-    <p class="lede">Paste your storefront product link and a competitor product link
-    (Daraz, Telemart, or any other product page). We read both prices and tell you who is cheaper.</p>
-    <form method="post" action="/compare" onsubmit="this.querySelector('button').disabled=true; this.querySelector('button').textContent='Comparing…';">
+    <p class="lede">Paste your storefront product link. Leave the competitor box empty
+    and we will search the web for the same item (Daraz, Telemart, PriceOye, and other shops),
+    then compare every listing that looks like a real match. Or paste a competitor URL to skip search.</p>
+    <form method="post" action="/compare" onsubmit="this.querySelector('button').disabled=true; this.querySelector('button').textContent='Searching the web…';">
       <div>
         <label>Your product link
           <input name="storefront_url" required placeholder="https://www.sadiq.ai/product-details/..." value="{_esc(ours)}"/>
         </label>
       </div>
       <div>
-        <label>Competitor product link
-          <input name="competitor_url" required placeholder="https://www.daraz.pk/products/..." value="{_esc(theirs)}"/>
+        <label>Competitor product link (optional)
+          <input name="competitor_url" placeholder="Leave empty to search automatically" value="{_esc(theirs)}"/>
         </label>
       </div>
-      <button type="submit">Compare prices</button>
+      <button type="submit">Find matches and compare</button>
     </form>
     {banner}
     {cards}
-    <p><a class="docs" href="/docs">API docs</a></p>
+    <p><a class="docs" href="/automate">Need to do 5,000 products?</a>
+    · <a class="docs" href="/docs">API docs</a></p>
   </main>
 </body>
 </html>"""
@@ -148,21 +210,286 @@ async def compare_form():
 @router.post("/compare", response_class=HTMLResponse)
 async def compare_submit(
     storefront_url: str = Form(...),
-    competitor_url: str = Form(...),
+    competitor_url: str = Form(default=""),
 ):
     tenant = await find_tenant_by_slug("sadiq")
+    ours = storefront_url.strip()
+    theirs = (competitor_url or "").strip()
     if not tenant:
-        return HTMLResponse(_page(error="No tenant is configured.", ours=storefront_url, theirs=competitor_url), status_code=500)
+        return HTMLResponse(_page(error="No tenant is configured.", ours=ours, theirs=theirs), status_code=500)
     try:
-        result = await compare_storefront_and_competitor(
-            tenant,
-            storefront_url=storefront_url.strip(),
-            competitor_url=competitor_url.strip(),
-            auto_approve=True,
-        )
-        return HTMLResponse(_page(result=result, ours=storefront_url, theirs=competitor_url))
+        if theirs:
+            result = await compare_storefront_and_competitor(
+                tenant,
+                storefront_url=ours,
+                competitor_url=theirs,
+                auto_approve=True,
+            )
+        else:
+            result = await discovery.discover_from_storefront(tenant, ours)
+        return HTMLResponse(_page(result=result, ours=ours, theirs=theirs))
     except Exception as exc:
         return HTMLResponse(
-            _page(error=str(exc), ours=storefront_url, theirs=competitor_url),
+            _page(error=str(exc), ours=ours, theirs=theirs),
             status_code=400,
         )
+
+
+def _automate_page(
+    *,
+    coverage: dict | None = None,
+    unmapped: dict | None = None,
+    import_result: dict | None = None,
+    refresh_result: dict | None = None,
+    error: str | None = None,
+    mappings: str = "",
+) -> str:
+    coverage = coverage or {}
+    unmapped = unmapped or {"items": []}
+    banner = ""
+    if error:
+        banner = f'<div class="banner err">{_esc(error)}</div>'
+    elif import_result:
+        banner = (
+            f'<div class="banner ok"><p class="head">Imported {import_result.get("imported", 0)} '
+            f'mapping(s)</p><p>{import_result.get("failed", 0)} failed. '
+            f'Saved URLs will refresh automatically on the schedule.</p></div>'
+        )
+        if import_result.get("errors"):
+            banner += "<ul class='errs'>" + "".join(
+                f"<li>{_esc(e.get('input'))}: {_esc(e.get('error'))}</li>"
+                for e in import_result["errors"][:8]
+            ) + "</ul>"
+    elif refresh_result:
+        if refresh_result.get("status") == "started":
+            banner = f'<div class="banner ok"><p class="head">Refresh started</p><p>{_esc(refresh_result.get("message"))}</p></div>'
+        else:
+            banner = (
+                f'<div class="banner ok"><p class="head">Refreshed {refresh_result.get("refreshed", 0)} '
+                f'prices</p><p>{refresh_result.get("failed", 0)} failed.</p></div>'
+            )
+
+    rows = ""
+    for item in (unmapped.get("items") or [])[:25]:
+        pid = _esc(item.get("id"))
+        rows += (
+            "<tr>"
+            f"<td>{_esc(item.get('title'))}</td>"
+            f"<td>Rs. {_fmt(item.get('price'))}</td>"
+            f"<td><form method='post' action='/automate/discover' style='margin:0;padding:0;border:0;background:none;'>"
+            f"<input type='hidden' name='product_id' value='{pid}'/>"
+            f"<button class='ghost tiny' type='submit'>Search web</button></form></td>"
+            "</tr>"
+        )
+    if not rows:
+        rows = "<tr><td colspan='3'>No unmapped active products in the cache. Sync the catalog first.</td></tr>"
+
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Automate catalog</title>
+  <style>
+    :root {{
+      --bg: #0f1419; --card: #1a222c; --ink: #f4f1ea; --muted: #9aa7b5;
+      --accent: #e8c547; --ok: #3dd68c; --warn: #ff8a4c; --err: #ff6b6b;
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      margin: 0; font-family: ui-sans-serif, system-ui, sans-serif;
+      background: radial-gradient(1200px 600px at 10% -10%, #243044, var(--bg));
+      color: var(--ink); min-height: 100vh;
+    }}
+    main {{ max-width: 860px; margin: 0 auto; padding: 48px 20px 80px; }}
+    h1 {{ font-size: 1.8rem; font-weight: 650; margin: 0 0 8px; }}
+    h2 {{ font-size: 1.15rem; margin: 28px 0 10px; }}
+    .lede {{ color: var(--muted); margin: 0 0 22px; line-height: 1.55; }}
+    nav {{ margin: 0 0 18px; font-size: 0.9rem; }}
+    nav a {{ color: var(--accent); text-decoration: none; margin-right: 14px; }}
+    .stats {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 22px; }}
+    .stat {{ background: var(--card); border: 1px solid #2c3947; border-radius: 14px; padding: 16px; }}
+    .stat b {{ display: block; font-size: 1.6rem; }}
+    .stat span {{ color: var(--muted); font-size: 0.85rem; }}
+    ol.steps {{ color: var(--muted); line-height: 1.55; padding-left: 20px; }}
+    form, .panel {{
+      background: var(--card); border: 1px solid #2c3947; border-radius: 16px;
+      padding: 22px; display: grid; gap: 12px; margin-bottom: 16px;
+    }}
+    label {{ font-size: 0.85rem; color: var(--muted); }}
+    textarea {{
+      width: 100%; min-height: 140px; margin-top: 6px; padding: 12px 14px; border-radius: 10px;
+      border: 1px solid #334155; background: #0f1720; color: var(--ink); font-size: 0.85rem;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }}
+    button, .btn {{
+      margin-top: 6px; padding: 12px 16px; border: 0; border-radius: 10px;
+      background: var(--accent); color: #1a1403; font-weight: 700; cursor: pointer;
+      text-decoration: none; display: inline-block; text-align: center;
+    }}
+    button.ghost, a.ghost {{ background: #2c3947; color: var(--ink); }}
+    button.tiny {{ margin: 0; padding: 6px 10px; font-size: 0.8rem; }}
+    button:disabled {{ opacity: 0.6; cursor: wait; }}
+    input[type=text], input[type=url] {{
+      width: 100%; margin-top: 6px; padding: 12px 14px; border-radius: 10px;
+      border: 1px solid #334155; background: #0f1720; color: var(--ink); font-size: 0.95rem;
+    }}
+    .banner {{ margin: 0 0 18px; padding: 18px 20px; border-radius: 14px; line-height: 1.45; }}
+    .banner .head {{ font-size: 1.15rem; font-weight: 700; margin: 0 0 6px; }}
+    .banner p {{ margin: 0; }}
+    .ok {{ background: #123528; border: 1px solid #1f6a45; }}
+    .err {{ background: #3a1518; border: 1px solid #a33; }}
+    table {{ width: 100%; border-collapse: collapse; font-size: 0.88rem; }}
+    th, td {{ text-align: left; padding: 8px 6px; border-bottom: 1px solid #2c3947; vertical-align: top; }}
+    th {{ color: var(--muted); font-weight: 600; }}
+    .mono {{ font-family: ui-monospace, Menlo, monospace; font-size: 0.75rem; color: var(--muted); word-break: break-all; }}
+    ul.errs {{ color: #ffb4b4; font-size: 0.85rem; }}
+    .row {{ display: flex; gap: 10px; flex-wrap: wrap; }}
+    @media (max-width: 640px) {{ .stats {{ grid-template-columns: 1fr; }} }}
+  </style>
+</head>
+<body>
+  <main>
+    <nav><a href="/compare">Compare one</a><a href="/automate">Automate catalog</a></nav>
+    <h1>Automate the catalog</h1>
+    <p class="lede">Paste a Sadiq product link (or pick a row below). We search the web
+    for the same item on other shops, compare prices, and save the matches.
+    After that, refresh is automatic. Searching 5,000 SKUs at once is slow — do them
+    one at a time here, or a few via the API.</p>
+    {banner}
+    <div class="stats">
+      <div class="stat"><b>{coverage.get("active_products", "—")}</b><span>Active products</span></div>
+      <div class="stat"><b>{coverage.get("mapped_to_external_competitor", "—")}</b><span>Mapped to a competitor URL</span></div>
+      <div class="stat"><b>{coverage.get("coverage_pct", "—")}%</b><span>Coverage ({coverage.get("unmapped", "—")} still need a URL)</span></div>
+    </div>
+    <form method="post" action="/automate/discover" onsubmit="this.querySelector('button').disabled=true; this.querySelector('button').textContent='Searching the web…';">
+      <label>Your product link or product_id
+        <input type="text" name="storefront_url" placeholder="https://www.sadiq.ai/product-details/... or a product_id"/>
+      </label>
+      <button type="submit">Search the web and compare</button>
+    </form>
+    <h2>How this works</h2>
+    <ol class="steps">
+      <li>We search the web for your product title (DuckDuckGo by default; add a Serper/Google key for better results).</li>
+      <li>We keep only product <em>pages</em> — not Daraz catalog/search, not social posts.</li>
+      <li>We read title + price, drop weak title matches and crazy price outliers, then compare.</li>
+      <li>Saved URLs refresh on a schedule. CSV import is still there if search misses a shop.</li>
+    </ol>
+    <div class="panel">
+      <div class="row">
+        <a class="btn ghost" href="/automate/unmapped.csv">Download unmapped CSV</a>
+        <form method="post" action="/automate/refresh" style="margin:0;padding:0;border:0;background:none;">
+          <button class="ghost" type="submit">Refresh mapped prices now</button>
+        </form>
+      </div>
+    </div>
+    <form method="post" action="/automate/bulk" onsubmit="this.querySelector('button[type=submit]').disabled=true; this.querySelector('button[type=submit]').textContent='Importing…';">
+      <label>Filled mappings (CSV or product_id,competitor_url)
+        <textarea name="mappings" placeholder="product_id,competitor_url&#10;6a822de15d1f9b7f071f2cfa,https://www.daraz.pk/products/spin-mop-...">{_esc(mappings)}</textarea>
+      </label>
+      <input type="file" accept=".csv,.txt" onchange="const r=new FileReader(); r.onload=()=>this.form.mappings.value=r.result; r.readAsText(this.files[0]);"/>
+      <button type="submit">Import mappings and compare</button>
+    </form>
+    <h2>Still unmapped</h2>
+    <table>
+      <thead><tr><th>Product</th><th>Your price</th><th></th></tr></thead>
+      <tbody>{rows}</tbody>
+    </table>
+  </main>
+</body>
+</html>"""
+
+
+async def _sadiq_tenant():
+    tenant = await find_tenant_by_slug("sadiq")
+    if not tenant:
+        raise RuntimeError("No tenant is configured.")
+    return tenant
+
+
+@router.get("/automate", response_class=HTMLResponse)
+async def automate_home():
+    try:
+        tenant = await _sadiq_tenant()
+        return HTMLResponse(
+            _automate_page(
+                coverage=await automation.coverage(tenant),
+                unmapped=await automation.list_unmapped(tenant, limit=25),
+            )
+        )
+    except Exception as exc:
+        return HTMLResponse(_automate_page(error=str(exc)), status_code=500)
+
+
+@router.get("/automate/unmapped.csv")
+async def automate_unmapped_csv():
+    from fastapi.responses import Response
+
+    tenant = await _sadiq_tenant()
+    data = await automation.list_unmapped(tenant, limit=5000)
+    return Response(
+        content=automation.unmapped_csv(data["items"]),
+        media_type="text/csv",
+        headers={"Content-Disposition": 'attachment; filename="unmapped-products.csv"'},
+    )
+
+
+@router.post("/automate/bulk", response_class=HTMLResponse)
+async def automate_bulk(mappings: str = Form(...)):
+    try:
+        tenant = await _sadiq_tenant()
+        result = await automation.import_mappings(tenant, mappings)
+        return HTMLResponse(
+            _automate_page(
+                coverage=await automation.coverage(tenant),
+                unmapped=await automation.list_unmapped(tenant, limit=25),
+                import_result=result,
+                mappings=mappings,
+            )
+        )
+    except Exception as exc:
+        return HTMLResponse(_automate_page(error=str(exc), mappings=mappings), status_code=400)
+
+
+@router.post("/automate/discover", response_class=HTMLResponse)
+async def automate_discover(
+    storefront_url: str = Form(default=""),
+    product_id: str = Form(default=""),
+):
+    try:
+        tenant = await _sadiq_tenant()
+        text = (storefront_url or "").strip()
+        pid = (product_id or "").strip()
+        if text.startswith("http"):
+            result = await discovery.discover_from_storefront(tenant, text)
+        elif text:
+            result = await discovery.discover_product(tenant, text)
+        elif pid:
+            result = await discovery.discover_product(tenant, pid)
+        else:
+            raise ValueError("Paste a storefront URL or product_id.")
+        # Reuse the compare page so multi-site results are easy to read.
+        return HTMLResponse(_page(result=result, ours=result.get("our_product", {}).get("url") or text))
+    except Exception as exc:
+        return HTMLResponse(_automate_page(error=str(exc)), status_code=400)
+
+
+@router.post("/automate/refresh", response_class=HTMLResponse)
+async def automate_refresh():
+    try:
+        tenant = await _sadiq_tenant()
+        started = {
+            "status": "started",
+            "message": "Refreshing saved competitor URLs in the background.",
+        }
+        # Run a small batch inline so the page shows a real result quickly.
+        result = await automation.refresh_mapped_prices(tenant, limit=10)
+        return HTMLResponse(
+            _automate_page(
+                coverage=await automation.coverage(tenant),
+                unmapped=await automation.list_unmapped(tenant, limit=25),
+                refresh_result=result or started,
+            )
+        )
+    except Exception as exc:
+        return HTMLResponse(_automate_page(error=str(exc)), status_code=400)
