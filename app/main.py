@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 
 from app.api import (
     routes_admin,
@@ -91,6 +91,11 @@ app.include_router(routes_matches.router, prefix=v1)
 app.include_router(routes_comparisons.router, prefix=v1)
 app.include_router(routes_alerts.router, prefix=v1)
 app.include_router(routes_admin.router, prefix=v1)
+
+
+@app.get("/", include_in_schema=False)
+async def root():
+    return RedirectResponse(url="/docs")
 
 
 @app.get("/health", tags=["meta"], summary="Liveness probe")

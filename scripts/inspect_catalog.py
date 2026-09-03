@@ -26,7 +26,14 @@ def main() -> None:
     print(f"connected → {settings.CATALOG_DB_NAME}")
     print("collections:")
     for name in sorted(db.list_collection_names()):
-        print(f"  {name:40s} ~{db[name].estimated_document_count()}")
+        if name.startswith("system."):
+            continue
+        try:
+            count = db[name].estimated_document_count()
+        except Exception as exc:
+            print(f"  {name:40s} (count skipped: {exc.__class__.__name__})")
+            continue
+        print(f"  {name:40s} ~{count}")
 
     products = db[settings.CATALOG_PRODUCTS_COLLECTION]
     sample = products.find_one({"active": True}) or products.find_one()

@@ -85,23 +85,26 @@ async def seed_default_tenant() -> None:
     Safe to call on every startup.
     """
     existing = await find_tenant_by_slug(settings.TENANT_SLUG)
+    catalog_from_env = {
+        "db_name": settings.CATALOG_DB_NAME,
+        "products_collection": settings.CATALOG_PRODUCTS_COLLECTION,
+        "categories_collection": settings.CATALOG_CATEGORIES_COLLECTION,
+        "marketplaces_collection": settings.CATALOG_MARKETPLACES_COLLECTION,
+        "product_groups_collection": settings.CATALOG_PRODUCT_GROUPS_COLLECTION,
+        "product_url_template": settings.STOREFRONT_PRODUCT_URL_TEMPLATE,
+        "sync_active_only": settings.CATALOG_SYNC_ACTIVE_ONLY,
+    }
     if existing:
+        db = get_priceintel_db()
+        updates = {f"catalog.{k}": v for k, v in catalog_from_env.items()}
         if (
             settings.TENANT_API_KEY
             and settings.TENANT_API_KEY != "change-me"
             and existing.get("api_key_hash") != hash_api_key(settings.TENANT_API_KEY)
         ):
-            db = get_priceintel_db()
-            await db.tenants.update_one(
-                {"_id": existing["_id"]},
-                {
-                    "$set": {
-                        "api_key_hash": hash_api_key(settings.TENANT_API_KEY),
-                        "api_key_prefix": settings.TENANT_API_KEY[:16],
-                    }
-                },
-            )
-            logger.info("Rotated API key hash for tenant slug=%s", settings.TENANT_SLUG)
+            updates["api_key_hash"] = hash_api_key(settings.TENANT_API_KEY)
+            updates["api_key_prefix"] = settings.TENANT_API_KEY[:16]
+        await db.tenants.update_one({"_id": existing["_id"]}, {"$set": updates})
         return
 
     catalog = {

@@ -41,7 +41,7 @@ class Settings(BaseSettings):
         ),
     )
     CATALOG_MARKETPLACES_COLLECTION: str = "marketplaces"
-    CATALOG_PRODUCT_GROUPS_COLLECTION: str = "product_groups"
+    CATALOG_PRODUCT_GROUPS_COLLECTION: str = "productgroups"
 
     # --- First tenant, seeded on startup ---
     TENANT_SLUG: str = "sadiq"

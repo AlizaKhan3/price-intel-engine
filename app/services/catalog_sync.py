@@ -41,16 +41,59 @@ async def _name_map(collection, name_fields: tuple[str, ...] = ("name", "title",
     return mapping
 
 
-async def sync_full_catalog(tenant: dict, batch_size: int = 500) -> dict:
+async def sync_full_catalog(
+    tenant: dict,
+    batch_size: int = 500,
+    limit: int | None = None,
+) -> dict:
     catalog = tenant.get("catalog") or {}
     tenant_key = tid(tenant)
     source = get_catalog_db(tenant)
     dest = get_priceintel_db()
+    started = datetime.utcnow()
+    await dest.sync_runs.update_one(
+        {"tenant_id": tenant_key, "job": "catalog"},
+        {"$set": {"status": "running", "started_at": started, "finished_at": None, "error": None, "limit": limit}},
+        upsert=True,
+    )
+
+    try:
+        result = await _sync_full_catalog_inner(
+            tenant, batch_size=batch_size, limit=limit, source=source, dest=dest
+        )
+    except Exception as exc:
+        logger.exception("Catalog sync failed tenant=%s", tenant_key)
+        await dest.sync_runs.update_one(
+            {"tenant_id": tenant_key, "job": "catalog"},
+            {"$set": {"status": "failed", "finished_at": datetime.utcnow(), "error": str(exc)}},
+        )
+        raise
+
+    result["started_at"] = started.isoformat() + "Z"
+    result["finished_at"] = datetime.utcnow().isoformat() + "Z"
+    await dest.sync_runs.update_one(
+        {"tenant_id": tenant_key, "job": "catalog"},
+        {"$set": {"status": "done", "finished_at": datetime.utcnow(), "result": result}},
+    )
+    return result
+
+
+async def _sync_full_catalog_inner(
+    tenant: dict,
+    *,
+    batch_size: int,
+    limit: int | None,
+    source,
+    dest,
+) -> dict:
+    catalog = tenant.get("catalog") or {}
+    tenant_key = tid(tenant)
 
     products_col = catalog.get("products_collection") or settings.CATALOG_PRODUCTS_COLLECTION
     categories_col = catalog.get("categories_collection") or settings.CATALOG_CATEGORIES_COLLECTION
     marketplaces_col = catalog.get("marketplaces_collection") or settings.CATALOG_MARKETPLACES_COLLECTION
 
+    logger.info("Catalog sync starting tenant=%s limit=%s", tenant_key, limit)
     category_names = await _name_map(source[categories_col])
     marketplace_names = await _name_map(source[marketplaces_col])
 
@@ -65,7 +108,10 @@ async def sync_full_catalog(tenant: dict, batch_size: int = 500) -> dict:
     url_template = catalog.get("product_url_template") or settings.STOREFRONT_PRODUCT_URL_TEMPLATE
     field_map = catalog.get("field_map") or {}
 
-    cursor = source[products_col].find(query)
+    cursor = source[products_col].find(query).batch_size(batch_size)
+    if limit:
+        cursor = cursor.limit(limit)
+
     async for raw in cursor:
         if "_id" not in raw:
             skipped += 1
@@ -83,14 +129,16 @@ async def sync_full_catalog(tenant: dict, batch_size: int = 500) -> dict:
         if len(batch) >= batch_size:
             await _upsert_batch(cache, batch)
             batch = []
+            logger.info("Catalog sync tenant=%s progress=%d", tenant_key, count)
 
     if batch:
         await _upsert_batch(cache, batch)
 
+    logger.info("Catalog sync tenant=%s products upserted=%d, building group matches", tenant_key, count)
     group_matches = await _upsert_group_matches(dest, tenant_key)
 
     logger.info(
-        "Catalog sync tenant=%s products=%d group_matches=%d",
+        "Catalog sync complete tenant=%s products=%d group_matches=%d",
         tenant_key,
         count,
         group_matches,
@@ -131,33 +179,41 @@ async def _upsert_group_matches(db, tenant_key: str) -> int:
     ]
     created = 0
     now = datetime.utcnow()
+    ops: list[UpdateOne] = []
     async for group in db.catalog_products.aggregate(pipeline):
         ids = sorted(group["ids"])
         canonical = ids[0]
         for other_id in ids[1:]:
             listing_key = f"catalog:{other_id}"
-            result = await db.product_matches.update_one(
-                {
-                    "tenant_id": tenant_key,
-                    "product_id": canonical,
-                    "competitor_listing_id": listing_key,
-                },
-                {
-                    "$setOnInsert": {
+            ops.append(
+                UpdateOne(
+                    {
                         "tenant_id": tenant_key,
                         "product_id": canonical,
                         "competitor_listing_id": listing_key,
-                        "peer_product_id": other_id,
-                        "tier": MatchTier.CATALOG_GROUP.value,
-                        "confidence": 100.0,
-                        "status": MatchStatus.APPROVED.value,
-                        "created_at": now,
-                    }
-                },
-                upsert=True,
+                    },
+                    {
+                        "$setOnInsert": {
+                            "tenant_id": tenant_key,
+                            "product_id": canonical,
+                            "competitor_listing_id": listing_key,
+                            "peer_product_id": other_id,
+                            "tier": MatchTier.CATALOG_GROUP.value,
+                            "confidence": 100.0,
+                            "status": MatchStatus.APPROVED.value,
+                            "created_at": now,
+                        }
+                    },
+                    upsert=True,
+                )
             )
-            if result.upserted_id:
-                created += 1
+            if len(ops) >= 500:
+                result = await db.product_matches.bulk_write(ops, ordered=False)
+                created += result.upserted_count
+                ops = []
+    if ops:
+        result = await db.product_matches.bulk_write(ops, ordered=False)
+        created += result.upserted_count
     return created
 
 

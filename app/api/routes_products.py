@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, Query
 
 from app.api.deps import get_current_tenant
 from app.api.serialize import dump_doc, dump_docs
@@ -31,10 +31,45 @@ async def me(tenant: dict = Depends(get_current_tenant)):
 @router.post(
     "/catalog/sync",
     summary="Sync catalog",
-    description="Pull the latest products from your MongoDB into PriceIntel. Safe to call repeatedly.",
+    description=(
+        "Pull products from your MongoDB into PriceIntel. "
+        "A full catalog (~14k products on a remote cluster) takes minutes, so by default "
+        "this returns immediately and runs in the background. "
+        "For a first Swagger test set limit=200. Poll GET /v1/catalog/status."
+    ),
 )
-async def trigger_catalog_sync(tenant: dict = Depends(get_current_tenant)):
-    return await sync_full_catalog(tenant)
+async def trigger_catalog_sync(
+    background_tasks: BackgroundTasks,
+    tenant: dict = Depends(get_current_tenant),
+    wait: bool = Query(
+        default=False,
+        description="Block until sync finishes. Leave false in Swagger so the UI does not hang.",
+    ),
+    limit: int | None = Query(
+        default=None,
+        ge=1,
+        le=50000,
+        description="Sync only this many products. Use 200 for a smoke test.",
+    ),
+):
+    if wait:
+        return await sync_full_catalog(tenant, limit=limit)
+    background_tasks.add_task(sync_full_catalog, tenant, limit=limit)
+    return {
+        "status": "started",
+        "message": "Sync running in the background. Watch the server terminal, then GET /v1/catalog/status or GET /v1/products.",
+        "limit": limit,
+    }
+
+
+@router.get("/catalog/status", summary="Latest catalog sync status")
+async def catalog_status(tenant: dict = Depends(get_current_tenant)):
+    db = get_priceintel_db()
+    run = await db.sync_runs.find_one({"tenant_id": tid(tenant), "job": "catalog"})
+    products = await db.catalog_products.count_documents({"tenant_id": tid(tenant)})
+    body = dump_doc(run) or {"status": "never_run"}
+    body["products_in_cache"] = products
+    return body
 
 
 @router.get("/products", summary="List synced products")
