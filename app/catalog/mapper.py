@@ -15,10 +15,13 @@ from typing import Any
 from bson import ObjectId
 
 # Matches the live Sadiq `products` collection (see Compass screenshot).
+# Selling price is computed in project_product — prefer after_discount when it
+# is below list price; otherwise apply `discount` % (storefront does this too).
 DEFAULT_FIELD_MAP: dict[str, str | list[str]] = {
     "title": ["name", "title"],
     "price": ["after_discount", "price"],
-    "original_price": ["originalPrice", "old_price"],
+    "original_price": ["old_price", "originalPrice", "price"],
+    "discount_pct": "discount",
     "image_url": ["thumbnail", "imageUrl", "image"],
     "category_id": "category",
     "marketplace_id": "marketplace",
@@ -90,6 +93,41 @@ def as_int(value: Any) -> int:
         return 0
 
 
+def selling_price(raw: dict, fmap: dict | None = None) -> tuple[float, float | None]:
+    """
+    Return (customer-facing price, list/original price).
+
+    Sadiq storefront shows the discounted amount. Catalog sometimes leaves
+    `after_discount` equal to list price while `discount` still holds the %.
+    Prefer a real after_discount; otherwise apply the percent.
+    """
+    fmap = {**DEFAULT_FIELD_MAP, **(fmap or {})}
+    listed = as_float(_get(raw, fmap.get("price"), skip_zero=True))
+    after_keys = fmap.get("price")
+    # First key in price map is the sale field (after_discount for Sadiq).
+    after_spec = after_keys[0] if isinstance(after_keys, list) and after_keys else after_keys
+    after = as_float(_get(raw, after_spec, skip_zero=True)) if after_spec else 0.0
+    original = as_float(_get(raw, fmap.get("original_price"), skip_zero=True))
+    discount_pct = as_float(_get(raw, fmap.get("discount_pct")))
+    list_price = max(original, listed, after)
+
+    sale = after if after > 0 else listed
+    if discount_pct > 0 and list_price > 0:
+        from_pct = round(list_price * (1 - min(discount_pct, 100) / 100), 2)
+        # after_discount not applied (still ~list) → use % like the storefront.
+        if sale <= 0 or sale >= list_price * 0.99:
+            sale = from_pct
+        else:
+            sale = min(sale, from_pct)
+
+    if sale <= 0:
+        sale = listed or after or list_price
+    original_out = list_price if list_price > sale > 0 else (original or None)
+    if original_out is not None and original_out <= 0:
+        original_out = None
+    return sale, original_out
+
+
 def project_product(
     raw: dict,
     *,
@@ -113,7 +151,7 @@ def project_product(
     if not marketplace_id and group_id:
         marketplace_id = group_marketplaces.get(group_id)
     stock = as_int(_get(raw, fmap.get("stock")))
-    original = _get(raw, fmap.get("original_price"))
+    price, original_price = selling_price(raw, fmap)
     sku = _get(raw, fmap.get("sku"))
     barcode = _get(raw, fmap.get("barcode"))
 
@@ -130,8 +168,8 @@ def project_product(
         "marketplace_id": marketplace_id,
         "marketplace": marketplace_names.get(marketplace_id or "") or marketplace_id,
         "group_id": group_id,
-        "price": as_float(_get(raw, fmap.get("price"), skip_zero=True)),
-        "original_price": as_float(original) if original is not None else None,
+        "price": price,
+        "original_price": original_price,
         "currency": "PKR",
         "image_url": _get(raw, fmap.get("image_url")),
         "url": _storefront_url(product_url_template, raw, product_id, group_id),

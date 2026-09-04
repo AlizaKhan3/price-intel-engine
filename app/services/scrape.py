@@ -86,11 +86,8 @@ async def scrape_product_url(
 ) -> dict:
     db = get_priceintel_db()
     tenant_key = tid(tenant)
+    await sync_full_catalog(tenant, product_id=product_id)
     product = await db.catalog_products.find_one({"tenant_id": tenant_key, "id": product_id})
-    if not product:
-        logger.info("Product %s missing from cache, syncing one document", product_id)
-        await sync_full_catalog(tenant, product_id=product_id)
-        product = await db.catalog_products.find_one({"tenant_id": tenant_key, "id": product_id})
     if not product:
         raise ValueError(
             f"Product {product_id} was not found in the catalog database. Check the storefront URL."

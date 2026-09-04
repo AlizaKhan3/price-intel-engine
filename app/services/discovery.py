@@ -67,10 +67,9 @@ async def discover_product(
 ) -> dict:
     db = get_priceintel_db()
     key = tid(tenant)
+    # Always refresh this SKU so sale price / discount % match the storefront.
+    await sync_full_catalog(tenant, product_id=product_id)
     product = await db.catalog_products.find_one({"tenant_id": key, "id": product_id})
-    if not product:
-        await sync_full_catalog(tenant, product_id=product_id)
-        product = await db.catalog_products.find_one({"tenant_id": key, "id": product_id})
     if not product:
         raise ValueError(f"Product {product_id} was not found in the catalog.")
 
