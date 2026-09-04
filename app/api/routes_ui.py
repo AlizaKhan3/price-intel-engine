@@ -68,6 +68,7 @@ def _page(
             "<table><thead><tr><th>Shop</th><th>Price</th><th>vs you</th><th></th></tr></thead>"
             f"<tbody>{rows}</tbody></table>"
         )
+        cards += _leaderboard_html(ours_p, result.get("matches") or [])
         skipped = result.get("skipped") or []
         looked = result.get("searched_urls") or []
         if looked:
@@ -108,6 +109,16 @@ def _page(
         if result.get("difference_rs"):
             cards += (
                 f'<p class="diff">Difference: <strong>Rs. {_fmt(result.get("difference_rs"))}</strong></p>'
+            )
+        if theirs_p.get("price"):
+            cards += _leaderboard_html(
+                ours_p,
+                [
+                    {
+                        "competitor_listing": theirs_p,
+                        "headline": result.get("headline"),
+                    }
+                ],
             )
     return f"""<!doctype html>
 <html lang="en">
@@ -197,7 +208,83 @@ def _page(
       100% {{ background-position: -100% 0; }}
     }}
     #loading-step {{ color: var(--accent); font-weight: 600; min-height: 1.4em; }}
-    @media (max-width: 640px) {{ .grid {{ grid-template-columns: 1fr; }} }}
+    .board {{
+      margin: 28px 0 8px; padding: 22px 18px 18px; border-radius: 16px;
+      background: var(--card); border: 1px solid #2c3947;
+    }}
+    .board h2 {{
+      margin: 0 0 4px; font-size: 1.15rem; font-weight: 700;
+    }}
+    .board .sub {{
+      margin: 0 0 20px; color: var(--muted); font-size: 0.88rem;
+    }}
+    .podium {{
+      display: grid; grid-template-columns: 1fr 1.15fr 1fr; gap: 10px;
+      align-items: end; margin-bottom: 16px;
+    }}
+    .stage {{
+      text-align: center; border-radius: 14px 14px 10px 10px;
+      padding: 14px 10px 12px; border: 1px solid #2c3947;
+      background: #121a24; position: relative;
+      animation: rise 0.55s ease-out both;
+    }}
+    .stage.you {{
+      border-color: #6b5a1a; box-shadow: inset 0 0 0 1px rgba(232,197,71,0.25);
+    }}
+    .stage .place {{
+      display: inline-block; font-size: 0.72rem; font-weight: 800;
+      letter-spacing: 0.04em; padding: 3px 8px; border-radius: 999px;
+      margin-bottom: 8px; color: #0f1419;
+    }}
+    .stage.first .place {{ background: #e8c547; }}
+    .stage.second .place {{ background: #c0c7d1; }}
+    .stage.third .place {{ background: #c9855a; }}
+    .stage .shop {{
+      font-weight: 700; font-size: 0.95rem; margin: 0 0 4px;
+      word-break: break-word;
+    }}
+    .stage .amt {{
+      font-size: 1.25rem; font-weight: 800; margin: 0 0 4px; color: var(--accent);
+    }}
+    .stage.first .amt {{ font-size: 1.4rem; }}
+    .stage .hint {{ margin: 0; font-size: 0.75rem; color: var(--muted); }}
+    .stage .hint a {{ color: var(--accent); }}
+    .rank a {{ color: var(--accent); font-size: 0.78rem; }}
+    .stage .bar {{
+      margin: 12px -10px -12px; border-radius: 0 0 9px 9px;
+      background: linear-gradient(180deg, #2a3646, #1a2430);
+    }}
+    .stage.first .bar {{ height: 72px; background: linear-gradient(180deg, #3d3414, #241e0c); }}
+    .stage.second .bar {{ height: 48px; }}
+    .stage.third .bar {{ height: 32px; }}
+    .stage.first {{ order: 2; padding-top: 18px; }}
+    .stage.second {{ order: 1; }}
+    .stage.third {{ order: 3; }}
+    .ranks {{ display: grid; gap: 8px; }}
+    .rank {{
+      display: grid; grid-template-columns: 48px 1fr auto; gap: 10px;
+      align-items: center; padding: 10px 12px; border-radius: 12px;
+      background: #121a24; border: 1px solid #2c3947;
+      animation: rise 0.45s ease-out both;
+    }}
+    .rank.you {{ border-color: #6b5a1a; }}
+    .rank .badge {{
+      width: 36px; height: 36px; border-radius: 10px; display: grid; place-items: center;
+      font-weight: 800; font-size: 0.8rem; background: #243044; color: var(--ink);
+    }}
+    .rank .name {{ font-weight: 650; margin: 0; }}
+    .rank .meta {{ margin: 2px 0 0; font-size: 0.78rem; color: var(--muted); }}
+    .rank .amt {{ font-weight: 750; color: var(--accent); white-space: nowrap; }}
+    @keyframes rise {{
+      from {{ opacity: 0; transform: translateY(12px); }}
+      to {{ opacity: 1; transform: translateY(0); }}
+    }}
+    @media (max-width: 640px) {{
+      .grid {{ grid-template-columns: 1fr; }}
+      .podium {{ grid-template-columns: 1fr; }}
+      .stage.first, .stage.second, .stage.third {{ order: 0; }}
+      .stage .bar {{ height: 10px !important; }}
+    }}
   </style>
 </head>
 <body>
@@ -277,6 +364,114 @@ def _fmt(value) -> str:
         return f"{float(value):,.0f}"
     except (TypeError, ValueError):
         return "—"
+
+
+def _ordinal(n: int) -> str:
+    if 10 <= n % 100 <= 20:
+        suffix = "th"
+    else:
+        suffix = {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{suffix}"
+
+
+def _leaderboard_html(ours_p: dict, matches: list[dict]) -> str:
+    """Podium + ranked list: cheapest shop is 1st (Sadiq included)."""
+    entries = []
+    our_price = ours_p.get("price")
+    try:
+        our_num = float(our_price)
+    except (TypeError, ValueError):
+        our_num = None
+    if our_num is not None and our_num > 0:
+        entries.append(
+            {
+                "name": "Sadiq.ai",
+                "seller": ours_p.get("marketplace") or "Your store",
+                "price": our_num,
+                "url": ours_p.get("url") or "",
+                "you": True,
+            }
+        )
+    for row in matches:
+        listing = row.get("competitor_listing") or {}
+        try:
+            price = float(listing.get("price"))
+        except (TypeError, ValueError):
+            continue
+        if price <= 0:
+            continue
+        entries.append(
+            {
+                "name": competitor_label(listing.get("competitor") or "Shop"),
+                "seller": (listing.get("title") or "")[:70],
+                "price": price,
+                "url": listing.get("url") or "",
+                "you": False,
+            }
+        )
+    if len(entries) < 2:
+        return ""
+
+    entries.sort(key=lambda item: (item["price"], 0 if item["you"] else 1))
+    top = entries[:5]
+    cheapest = top[0]["price"]
+
+    podium_slots = []
+    # Visual order on desktop: 2nd | 1st | 3rd
+    for rank, css in ((2, "second"), (1, "first"), (3, "third")):
+        if rank > len(top):
+            continue
+        item = top[rank - 1]
+        you = " you" if item["you"] else ""
+        gap = item["price"] - cheapest
+        hint = "Cheapest" if gap < 1 else f"+ Rs. {_fmt(gap)} vs 1st"
+        if item["you"]:
+            hint = "You're #1 — cheapest" if gap < 1 else f"{hint} · you"
+        open_link = (
+            f" · <a href='{_esc(item['url'])}' target='_blank' rel='noreferrer'>Open</a>"
+            if item["url"]
+            else ""
+        )
+        podium_slots.append(
+            f"<div class='stage {css}{you}'>"
+            f"<span class='place'>{_ordinal(rank)}</span>"
+            f"<p class='shop'>{_esc(item['name'])}</p>"
+            f"<p class='amt'>Rs. {_fmt(item['price'])}</p>"
+            f"<p class='hint'>{_esc(item['seller'])}</p>"
+            f"<p class='hint'>{_esc(hint)}{open_link}</p>"
+            f"<div class='bar' aria-hidden='true'></div>"
+            f"</div>"
+        )
+
+    rest = ""
+    for idx, item in enumerate(top[3:], start=4):
+        you = " you" if item["you"] else ""
+        gap = item["price"] - cheapest
+        meta = "Your listing" if item["you"] else (item["seller"] or "Competitor")
+        if gap >= 1:
+            meta = f"{meta} · + Rs. {_fmt(gap)} vs 1st"
+        rest += (
+            f"<div class='rank{you}' style='animation-delay:{0.05 * idx}s'>"
+            f"<div class='badge'>{_ordinal(idx)}</div>"
+            f"<div><p class='name'>{_esc(item['name'])}</p>"
+            f"<p class='meta'>{_esc(meta)}</p></div>"
+            f"<div class='amt'>Rs. {_fmt(item['price'])}</div>"
+            f"</div>"
+        )
+
+    winner = top[0]["name"]
+    sub = (
+        f"{_esc(winner)} is 1st at Rs. {_fmt(cheapest)}. "
+        "Ranked by lowest price (same product matches only)."
+    )
+    return (
+        "<section class='board' aria-label='Price leaderboard'>"
+        "<h2>Price leaderboard</h2>"
+        f"<p class='sub'>{sub}</p>"
+        f"<div class='podium'>{''.join(podium_slots)}</div>"
+        + (f"<div class='ranks'>{rest}</div>" if rest else "")
+        + "</section>"
+    )
 
 
 @router.get("/compare", response_class=HTMLResponse)
