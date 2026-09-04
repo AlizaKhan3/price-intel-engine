@@ -1,0 +1,17 @@
+# Railway: deploy from GitHub, set env vars in the dashboard.
+# Redis: add a Redis plugin and map REDIS_URL.
+# Optional worker service: same image, startCommand =
+#   celery -A app.tasks.celery_app worker --loglevel=info
+# Optional beat service:
+#   celery -A app.tasks.celery_app beat --loglevel=info
+
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+startCommand = "uvicorn app.main:app --host 0.0.0.0 --port $PORT"
+healthcheckPath = "/health"
+healthcheckTimeout = 30
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 5
