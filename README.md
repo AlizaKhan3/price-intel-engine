@@ -1,157 +1,183 @@
-# PriceIntel
+<p align="center">
+  <img src="docs/screenshots/00-hero-banner.jpg" alt="PriceIntel — paste a product link, compare the market" width="920"/>
+</p>
 
-Multi-tenant price intelligence: compare a marketplace catalog against
-competitor listings, track history, and alert on undercuts.
+<h1 align="center">PriceIntel</h1>
 
-Each customer is a **tenant** with their own API key, catalog connection,
-field map, competitors, and alert settings.
+<p align="center">
+  <strong>Paste one product URL → search the web → rank shops by price.</strong><br/>
+  Multi-tenant price intelligence for marketplaces (first tenant: Sadiq.ai).
+</p>
 
-- Customer API reference: [`docs/customer-api.md`](docs/customer-api.md)
-- Architecture notes: [`docs/technical-doc.md`](docs/technical-doc.md)
-- Interactive docs once the API is running: http://localhost:8000/docs
+<p align="center">
+  <a href="http://localhost:8000/compare">Compare UI</a> ·
+  <a href="http://localhost:8000/docs">API docs</a> ·
+  <a href="docs/customer-api.md">Customer API</a> ·
+  <a href="docs/technical-doc.md">Architecture</a>
+</p>
 
-## Setup
+<p align="center">
+  <img alt="Python" src="https://img.shields.io/badge/Python-3.11-3776AB?style=flat-square&logo=python&logoColor=white"/>
+  <img alt="FastAPI" src="https://img.shields.io/badge/FastAPI-0.115-009688?style=flat-square&logo=fastapi&logoColor=white"/>
+  <img alt="MongoDB" src="https://img.shields.io/badge/MongoDB-catalog-47A248?style=flat-square&logo=mongodb&logoColor=white"/>
+  <img alt="Playwright" src="https://img.shields.io/badge/Playwright-scrape-2EAD33?style=flat-square&logo=playwright&logoColor=white"/>
+  <img alt="Railway" src="https://img.shields.io/badge/Deploy-Railway-0B0D0E?style=flat-square&logo=railway&logoColor=white"/>
+</p>
 
-### 1. Environment
+---
+
+## What it does
+
+| Step | Result |
+|------|--------|
+| 1. Paste your storefront product link | Catalog title + **sale price** (discount aware) |
+| 2. Leave competitor empty | Web search finds product pages (Daraz, Homducts, Kiswa, …) |
+| 3. Match + scrape | Weak titles & crazy prices dropped |
+| 4. Compare | Table + **1st–5th price leaderboard** (Sadiq included) |
+
+---
+
+## Screenshots
+
+### Paste a link
+
+<p align="center">
+  <img src="docs/screenshots/01-compare-form.jpg" alt="Compare form" width="720"/>
+</p>
+
+### Live search animation
+
+<p align="center">
+  <img src="docs/screenshots/comparing.gif" alt="Comparing prices across shops" width="520"/>
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/02-comparing-loading.jpg" alt="Loading state while shops are checked" width="720"/>
+</p>
+
+### Results + leaderboard (1st → 5th)
+
+<p align="center">
+  <img src="docs/screenshots/03-results-leaderboard.jpg" alt="Price table and podium leaderboard" width="720"/>
+</p>
+
+### Bulk automate & API
+
+<p align="center">
+  <img src="docs/screenshots/04-automate.jpg" alt="Automate catalog page" width="720"/>
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/05-api-docs.jpg" alt="Swagger API docs" width="720"/>
+</p>
+
+---
+
+## Quick start
 
 ```bash
-cp .env.example .env
-```
-
-`.env` is gitignored. Fill in:
-
-| Variable | What to put |
-|---|---|
-| `CATALOG_MONGO_URI` | Read-only URI for the tenant catalog (`authSource=admin`) |
-| `CATALOG_DB_NAME` | Catalog database name (dev vs prod as you choose) |
-| `PRICEINTEL_MONGO_URI` | Same cluster is fine |
-| `PRICEINTEL_DB_NAME` | `price_intel` (new database, created automatically) |
-| `TENANT_API_KEY` | Key your app / dashboard sends as `Authorization: Bearer` |
-| `ADMIN_API_KEY` | Key **only operators** use to onboard other tenants |
-| `SMTP_USER` / `SMTP_PASSWORD` | Alert mailbox + **app password** (not the inbox password) |
-
-Leave `SLACK_WEBHOOK_URL` empty until you have a Slack incoming webhook.
-
-Default collection names are `products`, `categories`, `marketplaces`, and
-`product_groups`. Product fields (`name`, `group_id`, `marketplace`,
-`thumbnail`, and so on) are mapped in `app/catalog/mapper.py` and stored on
-the tenant record, so another customer can send a different `field_map`
-without a code change.
-
-### 2. Install
-
-```bash
+cp .env.example .env          # fill Mongo, TENANT_API_KEY, ADMIN_API_KEY
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-# Python 3.9 is OK (eval_type_backport is in requirements). 3.11+ is preferred.
-playwright install chromium   # only needed when you start scraping competitors
-```
-
-### 3. Redis
-
-```bash
-docker compose up -d
-```
-
-PriceIntel data lives in the `price_intel` database on your Mongo URI.
-A local Mongo is optional: `docker compose --profile local-mongo up -d`.
-
-### 4. Confirm the catalog schema
-
-```bash
-python scripts/inspect_catalog.py
-```
-
-You should see `products` plus categories / marketplaces / groups. If a
-lookup collection name differs, change it in `.env` — do not hardcode it.
-
-### 5. Run the API
-
-```bash
+playwright install chromium
+docker compose up -d          # Redis
 uvicorn app.main:app --reload
 ```
 
-- Health: http://localhost:8000/health
-- Swagger: http://localhost:8000/docs  
-  Click **Authorize** and paste `TENANT_API_KEY`.
+Open:
 
-```bash
-export KEY='<TENANT_API_KEY from .env>'
-curl -s http://localhost:8000/v1/me -H "Authorization: Bearer $KEY"
-curl -s -X POST http://localhost:8000/v1/catalog/sync -H "Authorization: Bearer $KEY"
-curl -s -X POST http://localhost:8000/v1/comparisons/recompute -H "Authorization: Bearer $KEY"
-curl -s 'http://localhost:8000/v1/comparisons?min_gap_pct=5' -H "Authorization: Bearer $KEY"
-```
+- **Compare UI** → http://localhost:8000/compare  
+- **Health** → http://localhost:8000/health  
+- **Swagger** → http://localhost:8000/docs  
 
-The first sync already produces comparisons for products that share
-`group_id` across marketplaces in the catalog — no scraper required.
+Paste a Sadiq `product-details` URL, leave the competitor box empty, hit **Find matches and compare**.
 
-### 6. Automate thousands of products
+---
 
-Paste **your** product link. Competitor URLs are optional.
+## Environment (must-haves)
 
-1. Open http://localhost:8000/compare
-2. Paste a Sadiq product-details URL
-3. Leave the competitor box empty → **Find matches and compare**
+| Variable | Purpose |
+|----------|---------|
+| `CATALOG_MONGO_URI` / `CATALOG_DB_NAME` | Tenant catalog (read-only preferred) |
+| `PRICEINTEL_MONGO_URI` / `PRICEINTEL_DB_NAME` | Matches, history, tenants (`price_intel`) |
+| `TENANT_API_KEY` | Customer `Authorization: Bearer` |
+| `ADMIN_API_KEY` | Onboard tenants only |
+| `REDIS_URL` | Celery / queue (`redis://localhost:6379/0` locally) |
 
-PriceIntel searches the web for the same title, keeps product pages
-(Daraz `/products/…`, Telemart, PriceOye, and other shops), then compares
-prices. Weak title matches and crazy price outliers are dropped.
+Optional: `SERPER_API_KEY` (better PK search), SMTP for alerts. See [`.env.example`](.env.example).
 
-For a batch, use `/automate` or:
+Sale price: if catalog `after_discount` is stale but `discount` % is set, PriceIntel applies the % (e.g. Rs. 1000 − 21% → **Rs. 790**).
 
-```bash
-curl -s -X POST http://localhost:8000/v1/automation/discover \
-  -H "Authorization: Bearer $KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"storefront_url":"https://www.sadiq.ai/product-details/..."}'
-```
+---
 
-DuckDuckGo is the default search backend (no API key). Add `SERPER_API_KEY`
-or Google CSE keys in `.env` if results look thin. Searching 5,000 SKUs
-overnight is a Celery job, not a single button — one product takes ~30–60s.
+## Deploy (Railway)
 
-CSV import (`unmapped.csv`) is still available when search misses a shop.
+This repo includes a production `Dockerfile` + `railway.toml`.
 
-```bash
-curl -s http://localhost:8000/v1/automation/coverage -H "Authorization: Bearer $KEY"
-curl -s http://localhost:8000/v1/automation/unmapped.csv -H "Authorization: Bearer $KEY" -o unmapped.csv
-```
+1. Push to GitHub → Railway **Deploy from GitHub**
+2. Add **Redis** → set `REDIS_URL` via variable reference
+3. Paste the rest of `.env` into service Variables
+4. **Settings → Networking → Generate Domain** (port `8080` / `$PORT`)
+5. Visit `https://YOUR-DOMAIN/compare`
 
-### 7. Background jobs (after the first sync works)
+Optional workers (same image, different start command):
 
 ```bash
 celery -A app.tasks.celery_app worker --loglevel=info
 celery -A app.tasks.celery_app beat --loglevel=info
 ```
 
-## Matching without a database
+> Tip: Railway runs in a US region — free DuckDuckGo/Yahoo results can differ from local PK. Add `SERPER_API_KEY` for stabler Google-PK style discovery.
+
+---
+
+## API cheatsheet
+
+```bash
+export KEY='<TENANT_API_KEY>'
+
+curl -s http://localhost:8000/v1/me -H "Authorization: Bearer $KEY"
+
+curl -s -X POST http://localhost:8000/v1/automation/discover \
+  -H "Authorization: Bearer $KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"storefront_url":"https://www.sadiq.ai/product-details/..."}'
+```
+
+More: [`docs/customer-api.md`](docs/customer-api.md)
+
+---
+
+## Project layout
+
+```
+app/
+  api/           # REST + /compare + /automate UI
+  catalog/       # Field map (sale price / discount %)
+  scrapers/      # Daraz + generic Playwright fetchers
+  services/      # discovery, web_search, matching, scrape
+  tasks/         # Celery jobs
+Dockerfile       # API + Chromium for Railway
+railway.toml
+```
+
+---
+
+## Matching without Mongo
 
 ```bash
 python scripts/demo_matching.py
 ```
 
-## Adding another tenant
+Peek catalog schema:
 
 ```bash
-curl -s -X POST http://localhost:8000/v1/admin/tenants \
-  -H "X-Admin-Key: $ADMIN_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d @tenant.json
+python scripts/inspect_catalog.py
 ```
 
-See the payload in [`docs/customer-api.md`](docs/customer-api.md#5-onboarding-a-new-marketplace-platform-operators).
+---
 
-## Adding another competitor site
+## License
 
-Copy `app/scrapers/daraz.py`, adjust selectors, register it in
-`app/scrapers/registry.py`, and add the slug to that tenant's `competitors`
-list. Nothing else changes.
-
-## Email alerts
-
-1. Enable 2-Step Verification on the alert mailbox.
-2. Create an **app password**.
-3. Set `SMTP_USER` and `SMTP_PASSWORD` in `.env`.
-4. Alerts fire when a competitor is cheaper by `ALERT_PRICE_GAP_PCT` (default 5%).
+Proprietary — Sadiq.ai / PriceIntel.
