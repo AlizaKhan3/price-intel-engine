@@ -6,7 +6,7 @@
 
 <p align="center">
   <strong>Paste one product URL → search the web → rank shops by price.</strong><br/>
-  Multi-tenant price intelligence for marketplaces (first tenant: Sadiq.ai).
+  Multi-tenant price intelligence for marketplaces.
 </p>
 
 <p align="center">
@@ -33,7 +33,7 @@
 | 1. Paste your storefront product link | Catalog title + **sale price** (discount aware) |
 | 2. Leave competitor empty | Web search finds product pages (Daraz, Homducts, Kiswa, …) |
 | 3. Match + scrape | Weak titles & crazy prices dropped |
-| 4. Compare | Table + **1st–5th price leaderboard** (Sadiq included) |
+| 4. Compare | Table + **1st–5th price leaderboard** (your shop included) |
 
 ---
 
@@ -91,7 +91,7 @@ Open:
 - **Health** → http://localhost:8000/health  
 - **Swagger** → http://localhost:8000/docs  
 
-Paste a Sadiq `product-details` URL, leave the competitor box empty, hit **Find matches and compare**.
+Paste your storefront `product-details` URL, leave the competitor box empty, hit **Find matches and compare**.
 
 ---
 
@@ -142,7 +142,7 @@ curl -s http://localhost:8000/v1/me -H "Authorization: Bearer $KEY"
 curl -s -X POST http://localhost:8000/v1/automation/discover \
   -H "Authorization: Bearer $KEY" \
   -H "Content-Type: application/json" \
-  -d '{"storefront_url":"https://www.sadiq.ai/product-details/..."}'
+  -d '{"storefront_url":"https://your-store.com/product-details/..."}'
 ```
 
 More: [`docs/customer-api.md`](docs/customer-api.md)
@@ -180,4 +180,4 @@ python scripts/inspect_catalog.py
 
 ## License
 
-Proprietary — Sadiq.ai / PriceIntel.
+Proprietary — PriceIntel.
