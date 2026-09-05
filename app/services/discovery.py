@@ -43,12 +43,14 @@ BLOCKED_HOST_PARTS = (
     "duckduckgo.",
 )
 BLOCKED_PATH = re.compile(
-    r"/(catalog|search|sr|s|category|categories|collection|collections|"
-    r"shop|stores|login|cart|wishlist|tag|blog|news)(/|$)",
+    r"/(catalog|search|sr(?=/|$)|categories?|collections?|"
+    r"stores|login|cart|wishlist|tags?|blog|news)(/|$)",
     re.I,
 )
+# /shop/ alone is a catalog; /shop/some-product-slug is a product page.
+SHOP_INDEX = re.compile(r"/shops?/?$", re.I)
 PRODUCT_PATH = re.compile(
-    r"/(products?|item|itm|dp|gp/product|p)/",
+    r"/(products?|item|itm|dp|gp/product|p|shop)/[^/]+",
     re.I,
 )
 
@@ -219,14 +221,54 @@ GENERIC_WORDS = FILLER_WORDS | {
     "candy",
     "earring",
     "earrings",
-    "cosmetic",
-    "cosmetics",
-    "makeup",
     "home",
     "luxury",
     "imported",
     "high",
     "style",
+    # Category words shared by many unrelated SKUs (face wash ≠ gluta white wash).
+    "face",
+    "wash",
+    "whitening",
+    "white",
+    "brightening",
+    "bright",
+    "cream",
+    "serum",
+    "lotion",
+    "soap",
+    "gel",
+    "shampoo",
+    "conditioner",
+    "oil",
+    "mist",
+    "spray",
+    "ml",
+    "g",
+    "gm",
+    "kg",
+    "oz",
+    "size",
+    "volume",
+    "bottle",
+    "tube",
+    "skin",
+    "care",
+    "skincare",
+    "vintage",
+}
+
+# Materials / adjectives — helpful context, not identity.
+MATERIAL_WORDS = {
+    "acrylic",
+    "metal",
+    "plastic",
+    "clear",
+    "wood",
+    "leather",
+    "glass",
+    "steel",
+    "silicone",
 }
 
 # If our listing uses a group, the competitor title must use the same group.
@@ -235,7 +277,27 @@ TOKEN_GROUPS = (
     frozenset({"perfume", "perfumes", "fragrance", "cologne", "cosmetic", "cosmetics", "makeup"}),
     frozenset({"train"}),
     frozenset({"diffuser", "humidifier"}),
+    frozenset({"vitamin", "vitamins"}),
 )
+
+# Stable label per synonym group (avoid sorted() picking "cologne" for perfume).
+TOKEN_CANON = {
+    "jewelry": "jewelry",
+    "jewellery": "jewelry",
+    "jewelery": "jewelry",
+    "perfume": "perfume",
+    "perfumes": "perfume",
+    "fragrance": "perfume",
+    "cologne": "perfume",
+    "cosmetic": "perfume",
+    "cosmetics": "perfume",
+    "makeup": "perfume",
+    "train": "train",
+    "diffuser": "diffuser",
+    "humidifier": "diffuser",
+    "vitamin": "vitamin",
+    "vitamins": "vitamin",
+}
 
 
 async def _search_candidates(
@@ -258,7 +320,7 @@ async def _search_candidates(
             return
         if snippet_title:
             score, miss = _match_score(title, snippet_title, storefront_url)
-            if miss or score < 50:
+            if miss or score < max(55, settings.DISCOVERY_MIN_SCORE - 10):
                 return
         host = _host(clean)
         if seen_host.get(host, 0) >= per_host:
@@ -356,29 +418,77 @@ def _match_score(ours: str, theirs: str, storefront_url: str | None = None) -> t
 def _missing_required(ours: str, theirs: str, storefront_url: str | None) -> str | None:
     our_words = set(_normalize_title(f"{ours} {' '.join(_slug_words(storefront_url))}").split())
     their_words = set(_normalize_title(theirs).split())
+    brand = _brand_tokens(ours, storefront_url)
+    their_exp = _canonical_tokens(their_words) | their_words
+    brand_ok = bool(brand) and _canonical_tokens(brand).issubset(their_exp)
+
     missing = []
     for group in TOKEN_GROUPS:
         if our_words & group and not (their_words & group):
+            # Same brand line (Daily Wish Face Wash) can omit "Vitamin C" in the title.
+            if brand_ok and group & {"vitamin", "vitamins"}:
+                continue
             missing.append(sorted(our_words & group)[0])
     if missing:
         return "Different product (missing " + ", ".join(missing) + ")"
-    our_distinct = _canonical_tokens(our_words - GENERIC_WORDS)
-    their_distinct = _canonical_tokens(their_words - GENERIC_WORDS)
+
+    our_distinct = _canonical_tokens(our_words - GENERIC_WORDS - MATERIAL_WORDS)
+    their_distinct = _canonical_tokens(their_words - GENERIC_WORDS - MATERIAL_WORDS)
     if our_distinct and not (our_distinct & their_distinct):
         return "Different product (no distinctive words in common)"
+
+    # Brand / line name: "Daily Wish" must appear — "Gluta White Face Wash" must not pass.
+    if brand and not brand_ok:
+        return "Different product (brand mismatch: " + " ".join(sorted(brand)) + ")"
+
+    if our_distinct:
+        overlap = len(our_distinct & their_distinct)
+        need = 1 if len(our_distinct) <= 2 else max(2, (len(our_distinct) + 2) // 3)
+        # Strong brand match: one shared key word is enough (Daily Wish Face Wash).
+        if brand_ok:
+            need = min(need, 1)
+        if overlap < need:
+            return f"Different product (only {overlap}/{need} key words match)"
     return None
 
 
+def _brand_tokens(ours: str, storefront_url: str | None) -> set[str]:
+    """First distinctive title tokens — usually the brand/line name (e.g. daily wish)."""
+    weak_prefix = {
+        "digital",
+        "fast",
+        "mini",
+        "portable",
+        "electric",
+        "automatic",
+        "wireless",
+        "usb",
+        "led",
+        "smart",
+        "pro",
+        "max",
+        "super",
+        "ultra",
+        "acrylic",
+        "metal",
+        "plastic",
+        "clear",
+    }
+    words = [
+        w
+        for w in _normalize_title(f"{ours} {' '.join(_slug_words(storefront_url))}").split()
+        if w not in GENERIC_WORDS and not w.isdigit() and (len(w) > 1 or w == "c")
+    ]
+    if not words or words[0] in weak_prefix:
+        return set()
+    return set(words[:2])
+
+
 def _canonical_tokens(words: set[str]) -> set[str]:
-    """Treat jewellery/jewelry (and similar) as the same token."""
+    """Collapse synonyms (jewellery/jewelry, cosmetic/perfume) to one token."""
     mapped = set()
     for word in words:
-        for group in TOKEN_GROUPS:
-            if word in group:
-                mapped.add(sorted(group)[0])
-                break
-        else:
-            mapped.add(word)
+        mapped.add(TOKEN_CANON.get(word, word))
     return mapped
 
 
@@ -438,14 +548,13 @@ def _title_score(ours: str, theirs: str) -> float:
     b = _normalize_title(theirs)
     if not a or not b:
         return 0.0
-    return round(
-        max(
-            fuzz.token_set_ratio(a, b),
-            fuzz.token_sort_ratio(a, b),
-            fuzz.partial_ratio(a, b),
-        ),
-        1,
-    )
+    set_r = fuzz.token_set_ratio(a, b)
+    sort_r = fuzz.token_sort_ratio(a, b)
+    partial_r = fuzz.partial_ratio(a, b)
+    # Short competitor titles inflate partial_ratio ("face wash" vs long SKU).
+    if len(b.split()) <= 5:
+        partial_r = min(partial_r, (set_r + sort_r) / 2)
+    return round(max(set_r, sort_r, partial_r), 1)
 
 
 def _normalize_title(title: str) -> str:
@@ -469,6 +578,8 @@ def _is_product_url(url: str) -> bool:
         return False
     if host_cmp.endswith("daraz.pk"):
         return "/products/" in path.lower()
+    if SHOP_INDEX.search(path):
+        return False
     if BLOCKED_PATH.search(path):
         return False
     known = {s.lower() for s in settings.discovery_sites}

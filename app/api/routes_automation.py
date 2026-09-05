@@ -1,11 +1,13 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from app.api.deps import get_current_tenant
 from app.services import automation, discovery
+from app.services import usage as usage_log
+from app.services.tenants import tenant_id as tid
 
 router = APIRouter(prefix="/automation", tags=["automation"])
 
@@ -79,20 +81,54 @@ class DiscoverBody(BaseModel):
         default=None,
         description="Your product page. Used if product_id is omitted.",
     )
+    actor: str | None = Field(
+        default=None,
+        description="Optional name for the internal usage log.",
+    )
 
 
 @router.post(
     "/discover",
     summary="Search the web for the same product and compare every match",
 )
-async def discover_one(body: DiscoverBody, tenant: dict = Depends(get_current_tenant)):
+async def discover_one(
+    body: DiscoverBody,
+    request: Request,
+    tenant: dict = Depends(get_current_tenant),
+):
     try:
         if body.storefront_url:
-            return await discovery.discover_from_storefront(tenant, body.storefront_url)
-        if not body.product_id:
+            result = await discovery.discover_from_storefront(tenant, body.storefront_url)
+        elif body.product_id:
+            result = await discovery.discover_product(tenant, body.product_id)
+        else:
             raise ValueError("Provide product_id or storefront_url.")
-        return await discovery.discover_product(tenant, body.product_id)
+        summary = usage_log.summarize_result(result)
+        await usage_log.log_usage(
+            action="discover",
+            storefront_url=body.storefront_url
+            or (result.get("our_product") or {}).get("url")
+            or "",
+            actor=body.actor,
+            source="api",
+            tenant_id=tid(tenant),
+            request=request,
+            success=True,
+            **summary,
+        )
+        return result
     except ValueError as exc:
+        await usage_log.log_usage(
+            action="discover",
+            storefront_url=body.storefront_url or "",
+            product_id=body.product_id,
+            actor=body.actor,
+            source="api",
+            tenant_id=tid(tenant),
+            request=request,
+            success=False,
+            error=str(exc),
+        )
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 

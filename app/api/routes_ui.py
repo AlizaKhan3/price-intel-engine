@@ -1,12 +1,14 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Form
+from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse
 
+from app.config import get_settings
 from app.services import automation, discovery
 from app.services.scrape import compare_storefront_and_competitor
-from app.services.tenants import find_tenant_by_slug
+from app.services.tenants import find_tenant_by_slug, tenant_id as tid
 from app.services.urls import competitor_label
+from app.services import usage as usage_log
 
 router = APIRouter(tags=["ui"])
 
@@ -16,6 +18,7 @@ def _page(
     error: str | None = None,
     ours: str = "",
     theirs: str = "",
+    actor: str = "",
 ) -> str:
     banner = ""
     cards = ""
@@ -295,6 +298,11 @@ def _page(
     We search the web and compare the top shops (Daraz, Smart Accessories, Apricot, ShoppersPk, and others) — one listing per shop, cheapest first.</p>
     <form method="post" action="/compare" onsubmit="return startCompare(this);">
       <div>
+        <label>Your name (optional — for internal usage log)
+          <input name="actor" placeholder="e.g. Sadiq" value="{_esc(actor)}"/>
+        </label>
+      </div>
+      <div>
         <label>Your product link
           <input name="storefront_url" required placeholder="https://www.sadiq.ai/product-details/..." value="{_esc(ours)}"/>
         </label>
@@ -481,14 +489,20 @@ async def compare_form():
 
 @router.post("/compare", response_class=HTMLResponse)
 async def compare_submit(
+    request: Request,
     storefront_url: str = Form(...),
     competitor_url: str = Form(default=""),
+    actor: str = Form(default=""),
 ):
     tenant = await find_tenant_by_slug("sadiq")
     ours = storefront_url.strip()
     theirs = (competitor_url or "").strip()
+    who = (actor or "").strip()
     if not tenant:
-        return HTMLResponse(_page(error="No tenant is configured.", ours=ours, theirs=theirs), status_code=500)
+        return HTMLResponse(
+            _page(error="No tenant is configured.", ours=ours, theirs=theirs, actor=who),
+            status_code=500,
+        )
     try:
         if theirs:
             result = await compare_storefront_and_competitor(
@@ -497,14 +511,130 @@ async def compare_submit(
                 competitor_url=theirs,
                 auto_approve=True,
             )
+            action = "compare_links"
         else:
             result = await discovery.discover_from_storefront(tenant, ours)
-        return HTMLResponse(_page(result=result, ours=ours, theirs=theirs))
+            action = "discover"
+        summary = usage_log.summarize_result(result if isinstance(result, dict) else None)
+        await usage_log.log_usage(
+            action=action,
+            storefront_url=ours,
+            competitor_url=theirs,
+            actor=who,
+            source="ui",
+            tenant_id=tid(tenant),
+            request=request,
+            success=True,
+            **summary,
+        )
+        return HTMLResponse(_page(result=result, ours=ours, theirs=theirs, actor=who))
     except Exception as exc:
+        await usage_log.log_usage(
+            action="discover" if not theirs else "compare_links",
+            storefront_url=ours,
+            competitor_url=theirs,
+            actor=who,
+            source="ui",
+            tenant_id=tid(tenant),
+            request=request,
+            success=False,
+            error=str(exc),
+        )
         return HTMLResponse(
-            _page(error=str(exc), ours=ours, theirs=theirs),
+            _page(error=str(exc), ours=ours, theirs=theirs, actor=who),
             status_code=400,
         )
+
+
+@router.get("/usage", response_class=HTMLResponse)
+async def usage_page(key: str = ""):
+    import secrets
+
+    settings = get_settings()
+    expected = settings.ADMIN_API_KEY or ""
+    ok = bool(key) and bool(expected) and secrets.compare_digest(key, expected)
+    if not ok:
+        return HTMLResponse(
+            _usage_gate(),
+            status_code=401 if key else 200,
+        )
+    data = await usage_log.list_usage(limit=150)
+    return HTMLResponse(_usage_table(data, key))
+
+
+def _usage_gate() -> str:
+    return """<!doctype html>
+<html lang="en"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Usage log</title>
+<style>
+  body{margin:0;font-family:ui-sans-serif,system-ui,sans-serif;background:#0f1419;color:#f4f1ea;
+    min-height:100vh;display:grid;place-items:center}
+  form{background:#1a222c;border:1px solid #2c3947;border-radius:14px;padding:22px;width:min(420px,92vw);display:grid;gap:12px}
+  label{font-size:.85rem;color:#9aa7b5}input{padding:12px;border-radius:10px;border:1px solid #334155;background:#0f1720;color:#f4f1ea}
+  button{padding:12px;border:0;border-radius:10px;background:#e8c547;color:#1a1403;font-weight:700;cursor:pointer}
+  a{color:#9aa7b5;font-size:.85rem;text-align:center}
+</style></head><body>
+<form method="get" action="/usage">
+  <h1 style="margin:0;font-size:1.2rem">Internal usage log</h1>
+  <p style="margin:0;color:#9aa7b5;font-size:.9rem">Enter the admin key to see who ran compares and which product links were tried.</p>
+  <label>Admin key<input name="key" type="password" required placeholder="ADMIN_API_KEY"/></label>
+  <button type="submit">Open log</button>
+  <a href="/compare">← Back to compare</a>
+</form></body></html>"""
+
+
+def _usage_table(data: dict, key: str) -> str:
+    rows = ""
+    for item in data.get("items") or []:
+        when = _esc(item.get("created_at") or "")
+        actor = _esc(item.get("actor") or "—")
+        action = _esc(item.get("action") or "")
+        title = _esc((item.get("product_title") or "")[:70] or "—")
+        url = item.get("storefront_url") or ""
+        url_short = _esc(url[:70] + ("…" if len(url) > 70 else ""))
+        matches = item.get("match_count")
+        matches = "—" if matches is None else str(matches)
+        ok = "ok" if item.get("success") else "fail"
+        ip = _esc(item.get("ip") or "—")
+        err = _esc((item.get("error") or "")[:60])
+        rows += (
+            "<tr>"
+            f"<td>{when}</td>"
+            f"<td>{actor}</td>"
+            f"<td>{action}<div class='muted'>{ok} · {ip}</div></td>"
+            f"<td>{title}<div class='muted'><a href='{_esc(url)}' target='_blank' rel='noreferrer'>{url_short}</a></div></td>"
+            f"<td>{matches}</td>"
+            f"<td class='muted'>{err}</td>"
+            "</tr>"
+        )
+    if not rows:
+        rows = "<tr><td colspan='6'>No usage yet. Run a compare first.</td></tr>"
+    return f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Usage log</title>
+<style>
+  :root {{ --bg:#0f1419; --card:#1a222c; --ink:#f4f1ea; --muted:#9aa7b5; --accent:#e8c547; }}
+  body {{ margin:0; font-family:ui-sans-serif,system-ui,sans-serif; background:var(--bg); color:var(--ink); }}
+  main {{ max-width:1100px; margin:0 auto; padding:32px 18px 60px; }}
+  h1 {{ margin:0 0 6px; }} .lede {{ color:var(--muted); margin:0 0 18px; }}
+  a {{ color:var(--accent); }} .muted {{ color:var(--muted); font-size:.78rem; }}
+  table {{ width:100%; border-collapse:collapse; font-size:.86rem; background:var(--card); border-radius:12px; overflow:hidden; }}
+  th, td {{ text-align:left; padding:10px 8px; border-bottom:1px solid #2c3947; vertical-align:top; }}
+  th {{ color:var(--muted); font-weight:600; }}
+  .stat {{ display:inline-block; margin:0 12px 16px 0; padding:8px 12px; border-radius:10px; background:var(--card); border:1px solid #2c3947; }}
+</style></head><body><main>
+  <p><a href="/compare">← Compare</a></p>
+  <h1>Usage log</h1>
+  <p class="lede">Internal tracker: who ran a compare, when, and which product link.</p>
+  <div class="stat"><strong>{data.get("total", 0)}</strong> total runs</div>
+  <div class="stat">Showing <strong>{data.get("count", 0)}</strong> latest</div>
+  <table>
+    <thead><tr><th>When (UTC)</th><th>Who</th><th>Action</th><th>Product</th><th>Matches</th><th>Error</th></tr></thead>
+    <tbody>{rows}</tbody>
+  </table>
+  <p class="muted" style="margin-top:16px">Bookmark: /usage?key=… (keep the admin key private)</p>
+</main></body></html>"""
 
 
 def _automate_page(

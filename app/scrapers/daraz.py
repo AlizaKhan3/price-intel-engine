@@ -34,29 +34,61 @@ class DarazScraper(BaseScraper):
     async def fetch_product(self, page, url: str) -> CompetitorListing | None:
         if not PRODUCT_URL_RE.search(url):
             raise ValueError("Expected a daraz.pk /products/ URL")
-        await page.goto(url.split("?")[0], wait_until="domcontentloaded", timeout=30000)
-        await page.wait_for_timeout(2500)
+        clean = url.split("?")[0]
+        await page.goto(clean, wait_until="domcontentloaded", timeout=45000)
+        await page.wait_for_timeout(3500)
 
         data = await _json_ld_product(page)
+        if not data:
+            data = await _next_data_product(page)
         title = (data or {}).get("name")
         price = _offer_price(data)
         image_url = _image(data)
         in_stock = _in_stock(data)
 
         if not title:
-            title = await _text(page, ["h1", ".pdp-mod-product-badge-title", '[class*="pdp-mod-product-badge-title"]'])
+            title = await _text(
+                page,
+                [
+                    "h1",
+                    ".pdp-mod-product-badge-title",
+                    '[class*="pdp-mod-product-badge-title"]',
+                    '[data-qa-locator="product-title"]',
+                ],
+            )
+        if not title:
+            og = await page.query_selector('meta[property="og:title"]')
+            if og:
+                title = await og.get_attribute("content")
         if price is None:
-            price_text = await _text(page, [".pdp-price", ".pdp-v2-product-price", '[class*="pdp-price"]'])
+            price_text = await _text(
+                page,
+                [
+                    ".pdp-price",
+                    ".pdp-v2-product-price",
+                    '[class*="pdp-price"]',
+                    '[data-qa-locator="product-price"]',
+                ],
+            )
             price = _parse_price(price_text or "")
+        if price is None:
+            price = await _meta_price(page)
         url_price = _price_from_url(url)
         if url_price and (price is None or price < 1):
             price = url_price
 
         if not title or price is None:
+            # Last resort: page title often is "Name - Daraz.pk"
+            if not title:
+                raw = (await page.title() or "").split(" - ")[0].strip()
+                title = raw or None
+            if title and title.strip().lower() in {"error", "access denied", "captcha", "robot check"}:
+                title = None
             logger.warning("Could not parse Daraz product page %s title=%r price=%r", url, title, price)
-            return None
+            if not title or price is None:
+                return None
 
-        canonical = (data or {}).get("url") or url.split("?")[0]
+        canonical = (data or {}).get("url") or clean
         return CompetitorListing(
             competitor=self.competitor_name,
             competitor_product_id=_extract_id(canonical),
@@ -87,6 +119,59 @@ async def _json_ld_product(page) -> dict | None:
                 for item in node["@graph"]:
                     if isinstance(item, dict) and item.get("@type") == "Product":
                         return item
+    return None
+
+
+async def _next_data_product(page) -> dict | None:
+    """Daraz often embeds product fields in __NEXT_DATA__ when JSON-LD is missing."""
+    try:
+        raw = await page.eval_on_selector(
+            "script#__NEXT_DATA__",
+            "el => el && el.textContent",
+        )
+        if not raw:
+            return None
+        payload = json.loads(raw)
+    except Exception:
+        return None
+
+    def walk(node):
+        if isinstance(node, dict):
+            name = node.get("name") or node.get("title")
+            price = (
+                node.get("price")
+                or node.get("salePrice")
+                or (node.get("skus") or [{}])[0].get("price")
+                if isinstance(node.get("skus"), list) and node.get("skus")
+                else None
+            )
+            if name and price not in (None, "", 0, "0"):
+                return {"name": name, "offers": {"price": price}, "image": node.get("image")}
+            for value in node.values():
+                found = walk(value)
+                if found:
+                    return found
+        elif isinstance(node, list):
+            for item in node:
+                found = walk(item)
+                if found:
+                    return found
+        return None
+
+    return walk(payload)
+
+
+async def _meta_price(page) -> float | None:
+    for sel in (
+        'meta[itemprop="price"]',
+        'meta[property="product:price:amount"]',
+        'meta[property="og:price:amount"]',
+    ):
+        el = await page.query_selector(sel)
+        if el:
+            parsed = _parse_price((await el.get_attribute("content")) or "")
+            if parsed:
+                return parsed
     return None
 
 

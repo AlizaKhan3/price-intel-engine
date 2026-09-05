@@ -71,3 +71,7 @@ async def ensure_indexes() -> None:
     await db.price_snapshots.create_index([("listing_id", 1), ("recorded_at", -1)])
     await db.alerts.create_index([("tenant_id", 1), ("created_at", -1)])
     await db.comparisons_cache.create_index([("tenant_id", 1), ("gap_pct", -1)])
+
+    await db.usage_events.create_index([("created_at", -1)])
+    await db.usage_events.create_index([("storefront_url", 1), ("created_at", -1)])
+    await db.usage_events.create_index([("actor", 1), ("created_at", -1)])

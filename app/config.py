@@ -87,7 +87,7 @@ class Settings(BaseSettings):
     DISCOVERY_OPEN_WEB: bool = True
     DISCOVERY_MAX_URLS: int = 6
     DISCOVERY_PER_HOST: int = 1
-    DISCOVERY_MIN_SCORE: int = 70
+    DISCOVERY_MIN_SCORE: int = 78
     DISCOVERY_PRICE_MIN_RATIO: float = 0.5
     DISCOVERY_PRICE_MAX_RATIO: float = 2.5
 
