@@ -383,7 +383,7 @@ def _ordinal(n: int) -> str:
 
 
 def _leaderboard_html(ours_p: dict, matches: list[dict]) -> str:
-    """Podium + ranked list: cheapest shop is 1st (Sadiq included)."""
+    """Podium + ranked list: cheapest shop is 1st (your pasted link included)."""
     entries = []
     our_price = ours_p.get("price")
     try:
@@ -391,10 +391,11 @@ def _leaderboard_html(ours_p: dict, matches: list[dict]) -> str:
     except (TypeError, ValueError):
         our_num = None
     if our_num is not None and our_num > 0:
+        shop = (ours_p.get("marketplace") or "").strip() or "Your store"
         entries.append(
             {
-                "name": "Sadiq.ai",
-                "seller": ours_p.get("marketplace") or "Your store",
+                "name": shop,
+                "seller": (ours_p.get("title") or "Your listing")[:70],
                 "price": our_num,
                 "url": ours_p.get("url") or "",
                 "you": True,
