@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 """
-Pick one of your products → search the web → fetch product pages → compare.
+Paste any product URL → search the web → fetch product pages → compare.
 
-Does not scrape marketplace search/catalog pages. It asks a search engine
-for likely product URLs, then reads those detail pages the same way a
-pasted URL works.
+Catalog storefront URLs sync title/price from Mongo. Any other product page
+is scraped first. Search never uses marketplace catalog pages (e.g. Daraz
+/catalog/); only product detail URLs are opened.
 """
 import asyncio
 import logging
@@ -15,9 +15,16 @@ from urllib.parse import urlparse, urlunparse
 from app.config import get_settings
 from app.db import get_priceintel_db
 from app.services.catalog_sync import sync_full_catalog
-from app.services.scrape import attach_listing, fetch_competitor_listings
+from app.services.scrape import attach_listing, fetch_competitor_listings, scrape_url_as_our_product
 from app.services.tenants import tenant_id as tid
-from app.services.urls import competitor_from_url, competitor_label, product_id_from_storefront_url, slug_from_storefront_url
+from app.services.urls import (
+    competitor_from_url,
+    competitor_label,
+    is_catalog_storefront_url,
+    product_id_from_storefront_url,
+    slug_from_any_url,
+    slug_from_storefront_url,
+)
 from app.services.web_search import search_provider, search_web, shopify_products
 from rapidfuzz import fuzz
 
@@ -25,7 +32,6 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 
 BLOCKED_HOST_PARTS = (
-    "sadiq.ai",
     "facebook.",
     "instagram.",
     "youtube.",
@@ -56,8 +62,36 @@ PRODUCT_PATH = re.compile(
 
 
 async def discover_from_storefront(tenant: dict, storefront_url: str) -> dict:
-    product_id = product_id_from_storefront_url(storefront_url)
-    return await discover_product(tenant, product_id, storefront_url=storefront_url)
+    """
+    Paste any product URL → find the same item elsewhere → compare prices.
+
+    Catalog storefront URLs (e.g. Sadiq) still sync from Mongo.
+    Any other product page is scraped for title/price first.
+    """
+    url = (storefront_url or "").strip()
+    if is_catalog_storefront_url(url):
+        try:
+            product_id = product_id_from_storefront_url(url)
+            return await discover_product(tenant, product_id, storefront_url=url)
+        except ValueError:
+            pass
+    return await discover_from_external_url(tenant, url)
+
+
+async def discover_from_external_url(
+    tenant: dict,
+    product_url: str,
+    *,
+    max_urls: int | None = None,
+) -> dict:
+    product = await scrape_url_as_our_product(tenant, product_url)
+    return await _discover_with_product(
+        tenant,
+        product,
+        storefront_url=product_url,
+        max_urls=max_urls,
+        exclude_host=_host(product_url),
+    )
 
 
 async def discover_product(
@@ -74,13 +108,32 @@ async def discover_product(
     product = await db.catalog_products.find_one({"tenant_id": key, "id": product_id})
     if not product:
         raise ValueError(f"Product {product_id} was not found in the catalog.")
+    return await _discover_with_product(
+        tenant,
+        product,
+        storefront_url=storefront_url or product.get("url"),
+        max_urls=max_urls,
+        exclude_host=_host(storefront_url or product.get("url") or ""),
+    )
 
+
+async def _discover_with_product(
+    tenant: dict,
+    product: dict,
+    *,
+    storefront_url: str | None = None,
+    max_urls: int | None = None,
+    exclude_host: str | None = None,
+) -> dict:
     title = (product.get("title") or "").strip()
     if not title:
-        raise ValueError("That catalog product has no title to search with.")
+        raise ValueError("That product has no title to search with.")
 
     candidates = await _search_candidates(
-        title, max_urls=max_urls, storefront_url=storefront_url or product.get("url")
+        title,
+        max_urls=max_urls,
+        storefront_url=storefront_url or product.get("url"),
+        exclude_host=exclude_host,
     )
     skipped = []
     comparisons = []
@@ -101,12 +154,15 @@ async def discover_product(
     )
     min_score = settings.DISCOVERY_MIN_SCORE
     our_price = product.get("price") or 0
+    our_host = exclude_host or _host(storefront_url or product.get("url") or "")
 
     for url, listing, error in fetched:
         if error or listing is None:
             skipped.append({"url": url, "reason": error or "Could not read title/price"})
             continue
-        candidate = listing.model_dump()
+        if our_host and _host(url) == our_host:
+            skipped.append({"url": url, "reason": "Same shop as your pasted link"})
+            continue
         score, miss = _match_score(title, listing.title, storefront_url or product.get("url"))
         if miss:
             skipped.append(
@@ -304,6 +360,7 @@ async def _search_candidates(
     title: str,
     max_urls: int | None = None,
     storefront_url: str | None = None,
+    exclude_host: str | None = None,
 ) -> list[str]:
     cap = max_urls or settings.DISCOVERY_MAX_URLS
     per_host = max(1, settings.DISCOVERY_PER_HOST)
@@ -311,6 +368,7 @@ async def _search_candidates(
     found: list[str] = []
     seen_url: set[str] = set()
     seen_host: dict[str, int] = {}
+    source_host = (exclude_host or _host(storefront_url or "")).lower()
 
     def add(url: str, snippet_title: str = "") -> None:
         clean = _canonical_url(url)
@@ -318,18 +376,20 @@ async def _search_candidates(
             return
         if not _is_product_url(clean):
             return
+        host = _host(clean)
+        if source_host and (host == source_host or host.endswith("." + source_host) or source_host.endswith("." + host)):
+            return
         if snippet_title:
             score, miss = _match_score(title, snippet_title, storefront_url)
             if miss or score < max(55, settings.DISCOVERY_MIN_SCORE - 10):
                 return
-        host = _host(clean)
         if seen_host.get(host, 0) >= per_host:
             return
         seen_url.add(clean)
         seen_host[host] = seen_host.get(host, 0) + 1
         found.append(clean)
 
-    logger.info("Discovery queries=%s", queries)
+    logger.info("Discovery queries=%s exclude_host=%s", queries, source_host or None)
     # Open web first so Shopify "best fuzzy organizer" does not crowd out real matches.
     for query in queries[:2]:
         if len(found) >= cap:
@@ -357,6 +417,8 @@ async def _search_candidates(
     for site in settings.discovery_sites[:8]:
         if len(found) >= cap:
             break
+        if source_host and site in source_host:
+            continue
         if any(_host(item).endswith(site) for item in found):
             continue
         ranked = []
@@ -374,7 +436,7 @@ async def _search_candidates(
 
 
 def _slug_words(storefront_url: str | None) -> list[str]:
-    slug = slug_from_storefront_url(storefront_url or "") or ""
+    slug = slug_from_any_url(storefront_url or "") or slug_from_storefront_url(storefront_url or "") or ""
     return [word for word in slug.replace("_", "-").split("-") if word and not word.isdigit()]
 
 

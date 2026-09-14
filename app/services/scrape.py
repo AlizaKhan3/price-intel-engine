@@ -14,7 +14,12 @@ from app.services.catalog_sync import sync_full_catalog
 from app.services.compare_summary import explain_prices
 from app.services.matching.pipeline import find_best_match
 from app.services.tenants import tenant_id as tid
-from app.services.urls import competitor_from_url, competitor_label, product_id_from_storefront_url
+from app.services.urls import (
+    competitor_from_url,
+    competitor_label,
+    external_product_id,
+    product_id_from_storefront_url,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +33,50 @@ async def fetch_competitor_listing(competitor: str, competitor_url: str) -> Comp
             or "Could not read title/price from that competitor page. Try another product URL."
         )
     return listing
+
+
+async def scrape_url_as_our_product(tenant: dict, product_url: str) -> dict:
+    """
+    Read title + price from any product page and store it as a catalog row.
+
+    Used when the pasted link is not from the tenant catalog (generic mode).
+    """
+    db = get_priceintel_db()
+    tenant_key = tid(tenant)
+    clean = (product_url or "").strip()
+    if not clean.startswith("http"):
+        raise ValueError("Paste a full product URL starting with https://")
+
+    competitor = competitor_from_url(clean)
+    listing = await fetch_competitor_listing(competitor, clean)
+    product_id = external_product_id(clean)
+    shop = competitor_label(listing.competitor)
+    product = {
+        "tenant_id": tenant_key,
+        "id": product_id,
+        "title": listing.title.strip(),
+        "price": float(listing.price or 0),
+        "currency": "PKR",
+        "marketplace": shop,
+        "marketplace_id": listing.competitor,
+        "url": listing.url or clean,
+        "image_url": listing.image_url,
+        "active": True,
+        "in_stock": bool(listing.in_stock) if listing.in_stock is not None else True,
+        "source": "external_scrape",
+        "synced_at": datetime.utcnow(),
+    }
+    if not product["title"] or product["price"] <= 0:
+        raise ValueError(
+            "Could not read a title and price from that page. "
+            "Try another product URL, or a more specific product-details link."
+        )
+    await db.catalog_products.update_one(
+        {"tenant_id": tenant_key, "id": product_id},
+        {"$set": product},
+        upsert=True,
+    )
+    return product
 
 
 async def fetch_competitor_listings(
@@ -63,7 +112,15 @@ async def compare_storefront_and_competitor(
     competitor_url: str,
     auto_approve: bool = True,
 ) -> dict:
-    product_id = product_id_from_storefront_url(storefront_url)
+    from app.services.urls import is_catalog_storefront_url
+
+    if is_catalog_storefront_url(storefront_url):
+        product_id = product_id_from_storefront_url(storefront_url)
+        await sync_full_catalog(tenant, product_id=product_id)
+    else:
+        product = await scrape_url_as_our_product(tenant, storefront_url)
+        product_id = product["id"]
+
     competitor = competitor_from_url(competitor_url)
     return await scrape_product_url(
         tenant,
@@ -72,6 +129,7 @@ async def compare_storefront_and_competitor(
         competitor_url=competitor_url,
         auto_approve=auto_approve,
         storefront_url=storefront_url,
+        skip_catalog_sync=not is_catalog_storefront_url(storefront_url),
     )
 
 
@@ -83,14 +141,16 @@ async def scrape_product_url(
     competitor_url: str,
     auto_approve: bool = False,
     storefront_url: str | None = None,
+    skip_catalog_sync: bool = False,
 ) -> dict:
     db = get_priceintel_db()
     tenant_key = tid(tenant)
-    await sync_full_catalog(tenant, product_id=product_id)
+    if not skip_catalog_sync:
+        await sync_full_catalog(tenant, product_id=product_id)
     product = await db.catalog_products.find_one({"tenant_id": tenant_key, "id": product_id})
     if not product:
         raise ValueError(
-            f"Product {product_id} was not found in the catalog database. Check the storefront URL."
+            f"Product {product_id} was not found. Check the product URL."
         )
 
     listing = await fetch_competitor_listing(competitor, competitor_url)

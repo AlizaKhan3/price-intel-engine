@@ -294,17 +294,17 @@ def _page(
   <main>
     <nav><a href="/compare">Compare one</a><a href="/automate">Automate catalog</a></nav>
     <h1>Compare a product price</h1>
-    <p class="lede">Paste your storefront product link and leave the competitor box empty.
-    We search the web and compare the top shops (Daraz, Smart Accessories, Apricot, ShoppersPk, and others) — one listing per shop, cheapest first.</p>
+    <p class="lede">Paste any product page link (your shop or another site). Leave the competitor box empty —
+    we read the title and price, search the web, and compare matching shops — one listing per shop, cheapest first.</p>
     <form method="post" action="/compare" onsubmit="return startCompare(this);">
       <div>
         <label>Your name (optional — for internal usage log)
-          <input name="actor" placeholder="e.g. Sadiq" value="{_esc(actor)}"/>
+          <input name="actor" placeholder="e.g. Ali" value="{_esc(actor)}"/>
         </label>
       </div>
       <div>
-        <label>Your product link
-          <input name="storefront_url" required placeholder="https://www.sadiq.ai/product-details/..." value="{_esc(ours)}"/>
+        <label>Product link
+          <input name="storefront_url" required placeholder="https://any-shop.com/products/..." value="{_esc(ours)}"/>
         </label>
       </div>
       <div>
