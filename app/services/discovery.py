@@ -588,9 +588,8 @@ def _url_slug_matches(title: str, url: str, storefront_url: str | None = None) -
     models = _model_numbers(title)
     if models and not (models & _model_numbers(path)):
         return False
-    edition = {"pro", "plus", "max", "ultra", "fe"}
-    our_ed = set(_normalize_title(title).split()) & edition
-    path_ed = path_words & edition
+    our_ed = _edition_tokens(title)
+    path_ed = _edition_tokens(path)
     if models and our_ed != path_ed and (our_ed or path_ed):
         return False
     return True
@@ -602,6 +601,33 @@ def _match_score(ours: str, theirs: str, storefront_url: str | None = None) -> t
     if miss:
         return 0.0, miss
     return _title_score(ours, theirs), None
+
+
+def _edition_tokens(text: str) -> set[str]:
+    """Product editions (Watch 5 Pro), not shop names like 'Fone Pro'."""
+    edition = {"pro", "plus", "max", "ultra", "fe"}
+    raw = re.sub(r"([a-zA-Z])(\d)", r"\1 \2", text or "")
+    raw = re.sub(r"(\d)([a-zA-Z])", r"\1 \2", raw)
+    words = _normalize_title(raw).split()
+    found: set[str] = set()
+    for i, word in enumerate(words):
+        if word not in edition:
+            continue
+        window = words[max(0, i - 3) : i + 1]
+        near_model = any(any(ch.isdigit() for ch in token) for token in window)
+        near_device = i > 0 and words[i - 1] in {
+            "watch",
+            "phone",
+            "tab",
+            "bud",
+            "buds",
+            "book",
+            "pad",
+            "galaxy",
+        }
+        if near_model or near_device:
+            found.add(word)
+    return found
 
 
 def _missing_required(ours: str, theirs: str, storefront_url: str | None) -> str | None:
@@ -623,9 +649,8 @@ def _missing_required(ours: str, theirs: str, storefront_url: str | None) -> str
             + ")"
         )
 
-    edition = {"pro", "plus", "max", "ultra", "fe"}
-    our_ed = our_words & edition
-    their_ed = their_words & edition
+    our_ed = _edition_tokens(ours)
+    their_ed = _edition_tokens(theirs)
     # Only enforce editions when a model number is in play (Watch 5 ≠ Watch 5 Pro).
     if our_models and our_ed != their_ed and (our_ed or their_ed):
         return "Different product (edition mismatch: " + " ".join(sorted(our_ed | their_ed)) + ")"
@@ -768,6 +793,22 @@ def _short_title(title: str) -> str:
 
 
 def _title_score(ours: str, theirs: str) -> float:
+    """Score title similarity. Also compares brand+model core so marketing
+    fluff on either side (Premium / AMOLED / Advanced Health…) does not
+    drag a true match below the bar (e.g. 68 vs 78 on Watch 5)."""
+    scores = [_fuzzy_titles(ours, theirs)]
+    core = _core_product_query(ours)
+    if core and core.lower().strip() != (ours or "").lower().strip():
+        scores.append(_fuzzy_titles(core, theirs))
+    their_core = _core_product_query(theirs)
+    if their_core and their_core.lower().strip() != (theirs or "").lower().strip():
+        scores.append(_fuzzy_titles(ours, their_core))
+        if core:
+            scores.append(_fuzzy_titles(core, their_core))
+    return round(max(scores), 1)
+
+
+def _fuzzy_titles(ours: str, theirs: str) -> float:
     a = _normalize_title(ours)
     b = _normalize_title(theirs)
     if not a or not b:
@@ -778,7 +819,7 @@ def _title_score(ours: str, theirs: str) -> float:
     # Short competitor titles inflate partial_ratio ("face wash" vs long SKU).
     if len(b.split()) <= 5:
         partial_r = min(partial_r, (set_r + sort_r) / 2)
-    return round(max(set_r, sort_r, partial_r), 1)
+    return max(set_r, sort_r, partial_r)
 
 
 def _normalize_title(title: str) -> str:

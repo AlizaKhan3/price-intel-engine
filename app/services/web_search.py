@@ -25,32 +25,35 @@ SEARCH_UA = (
 
 def search_web(query: str, max_results: int = 8) -> list[dict]:
     settings = get_settings()
+    items: list[dict] = []
     if settings.SERPER_API_KEY:
         try:
-            return _serper(query, max_results, settings.SERPER_API_KEY)
+            items = _serper(query, max_results, settings.SERPER_API_KEY)
         except Exception as exc:
             logger.warning("Serper search failed (%s); falling back", exc)
-    if settings.GOOGLE_CSE_ID and settings.GOOGLE_CSE_KEY:
+    if len(items) < max_results and settings.GOOGLE_CSE_ID and settings.GOOGLE_CSE_KEY:
         try:
-            return _google_cse(query, max_results, settings.GOOGLE_CSE_ID, settings.GOOGLE_CSE_KEY)
+            items = _merge(items, _google_cse(query, max_results, settings.GOOGLE_CSE_ID, settings.GOOGLE_CSE_KEY))
         except Exception as exc:
             logger.warning("Google CSE search failed (%s); falling back", exc)
-    items: list[dict] = []
-    try:
-        items = _ddgs(query, max_results)
-    except Exception as exc:
-        logger.warning("DuckDuckGo package search failed (%s); using HTML fallback", exc)
-        items = []
     if len(items) < 2:
         try:
-            items = _merge(items, _duckduckgo_html(query, max_results))
+            items = _merge(items, _ddgs(query, max_results))
         except Exception as exc:
-            logger.warning("DuckDuckGo HTML search failed (%s)", exc)
-    if len(items) < 2:
+            logger.warning("DuckDuckGo package search failed (%s); using HTML fallback", exc)
+    # Railway/datacenter IPs often get empty Yahoo/DDG package results — keep
+    # trying HTML backends until we have enough links.
+    for name, fetcher in (
+        ("duckduckgo_html", _duckduckgo_html),
+        ("duckduckgo_lite", _ddg_lite),
+        ("bing_html", _bing_html),
+    ):
+        if len(items) >= max_results:
+            break
         try:
-            items = _merge(items, _bing_html(query, max_results))
+            items = _merge(items, fetcher(query, max_results))
         except Exception as exc:
-            logger.warning("Bing HTML search failed (%s)", exc)
+            logger.warning("%s search failed (%s)", name, exc)
     return items[:max_results]
 
 
@@ -164,6 +167,48 @@ def _duckduckgo_html(query: str, max_results: int) -> list[dict]:
             items.append({"title": title, "url": url})
         if len(items) >= max_results:
             break
+    return items
+
+
+def _ddg_lite(query: str, max_results: int) -> list[dict]:
+    """DuckDuckGo Lite — more reliable from datacenter IPs than html.duckduckgo.com."""
+    response = httpx.post(
+        "https://lite.duckduckgo.com/lite/",
+        data={"q": query},
+        headers={"User-Agent": SEARCH_UA},
+        timeout=20,
+        follow_redirects=True,
+    )
+    response.raise_for_status()
+    items = []
+    seen = set()
+    for match in re.finditer(
+        r'<a[^>]+href="(https?://[^"]+)"[^>]*class=[\'"]result-link[\'"][^>]*>(.*?)</a>',
+        response.text,
+        re.I | re.S,
+    ):
+        url = unescape(match.group(1))
+        if not url or url in seen or "duckduckgo.com" in url:
+            continue
+        seen.add(url)
+        title = re.sub(r"<[^>]+>", "", unescape(match.group(2))).strip()
+        items.append({"title": title, "url": url})
+        if len(items) >= max_results:
+            break
+    if len(items) < max_results:
+        for match in re.finditer(
+            r'<a[^>]+rel="nofollow"[^>]+href="(https?://[^"]+)"[^>]*>(.*?)</a>',
+            response.text,
+            re.I | re.S,
+        ):
+            url = unescape(match.group(1))
+            if not url or url in seen or "duckduckgo.com" in url:
+                continue
+            seen.add(url)
+            title = re.sub(r"<[^>]+>", "", unescape(match.group(2))).strip()
+            items.append({"title": title, "url": url})
+            if len(items) >= max_results:
+                break
     return items
 
 
