@@ -59,6 +59,57 @@ PRODUCT_PATH = re.compile(
     r"/(products?|item|itm|dp|gp/product|p|shop)/[^/]+",
     re.I,
 )
+# PriceOye / category PDPs: /smart-watches/samsung/slug-with-hyphens
+CATEGORY_PDP = re.compile(
+    r"^/(?:smart-watches|mobiles|laptops|tablets|appliances|fashion|health|"
+    r"beauty|groceries|tvs|cameras|audio|gaming|wearables)/[^/]+/[^/]+",
+    re.I,
+)
+MEGA_BRANDS = frozenset(
+    {
+        "samsung",
+        "apple",
+        "sony",
+        "huawei",
+        "xiaomi",
+        "oppo",
+        "vivo",
+        "oneplus",
+        "google",
+        "lg",
+        "dell",
+        "hp",
+        "lenovo",
+        "asus",
+        "nike",
+        "adidas",
+    }
+)
+# Watch case sizes / common pack counts — not product model identity.
+SIZE_NUMBERS = frozenset(
+    {"16", "32", "40", "41", "42", "44", "45", "46", "49", "64", "128", "256", "512"}
+)
+MARKETING_TAIL = frozenset(
+    {
+        "premium",
+        "smartwatch",
+        "fitness",
+        "tracking",
+        "amoled",
+        "display",
+        "advanced",
+        "health",
+        "monitoring",
+        "bluetooth",
+        "wifi",
+        "waterproof",
+        "wireless",
+        "original",
+        "official",
+        "bundle",
+        "combo",
+    }
+)
 
 
 async def discover_from_storefront(tenant: dict, storefront_url: str) -> dict:
@@ -185,17 +236,20 @@ async def _discover_with_product(
             )
             continue
         if our_price and not _discovery_price_ok(listing.price, our_price):
-            skipped.append(
-                {
-                    "url": url,
-                    "title": listing.title,
-                    "reason": (
-                        f"Price Rs. {listing.price:,.0f} is too far from yours "
-                        f"(Rs. {our_price:,.0f}) — likely a different size or item"
-                    ),
-                }
-            )
-            continue
+            # Strong title/model hits still count — pasted price can be a fake/outlier
+            # listing (e.g. Watch 5 at Rs. 4,500 vs real market ~60k).
+            if score < 90:
+                skipped.append(
+                    {
+                        "url": url,
+                        "title": listing.title,
+                        "reason": (
+                            f"Price Rs. {listing.price:,.0f} is too far from yours "
+                            f"(Rs. {our_price:,.0f}) — likely a different size or item"
+                        ),
+                    }
+                )
+                continue
         auto_approve = score >= (tenant.get("matching") or {}).get(
             "auto_approve_score", settings.MATCH_AUTO_APPROVE_SCORE
         )
@@ -381,8 +435,12 @@ async def _search_candidates(
             return
         if snippet_title:
             score, miss = _match_score(title, snippet_title, storefront_url)
-            if miss or score < max(55, settings.DISCOVERY_MIN_SCORE - 10):
-                return
+            if miss or score < max(50, settings.DISCOVERY_MIN_SCORE - 18):
+                # Snippet titles are often truncated; URL slug can still be a hit.
+                if not _url_slug_matches(title, clean, storefront_url):
+                    return
+        elif not _url_slug_matches(title, clean, storefront_url):
+            return
         if seen_host.get(host, 0) >= per_host:
             return
         seen_url.add(clean)
@@ -391,7 +449,13 @@ async def _search_candidates(
 
     logger.info("Discovery queries=%s exclude_host=%s", queries, source_host or None)
     # Open web first so Shopify "best fuzzy organizer" does not crowd out real matches.
-    for query in queries[:2]:
+    for query in queries[:3]:
+        if len(found) >= cap:
+            break
+        for row in await asyncio.to_thread(search_web, f"{query} Pakistan buy", 12):
+            add(row.get("url") or "", row.get("title") or "")
+            if len(found) >= cap:
+                break
         if len(found) >= cap:
             break
         for row in await asyncio.to_thread(search_web, f"{query} Pakistan", 12):
@@ -414,7 +478,7 @@ async def _search_candidates(
                 if len(found) >= cap:
                     break
 
-    for site in settings.discovery_sites[:8]:
+    for site in settings.discovery_sites[:10]:
         if len(found) >= cap:
             break
         if source_host and site in source_host:
@@ -447,6 +511,9 @@ def _search_queries(title: str, storefront_url: str | None = None) -> list[str]:
     if "train" in blob and "diffuser" in blob:
         queries.append("mini train shape essential oil diffuser")
         queries.append("steam train essential oil diffuser")
+    core = _core_product_query(title)
+    if core:
+        queries.append(core)
     # Keep "and" so we search like a person: "jewelry and perfume organizer".
     cleaned = re.sub(r"[^\w\s+-]", " ", title or "")
     keep_and = [
@@ -455,8 +522,10 @@ def _search_queries(title: str, storefront_url: str | None = None) -> list[str]:
         if w.lower() not in (FILLER_WORDS - {"and"}) and w.lower() not in {"premium"}
     ]
     if keep_and:
-        queries.append(" ".join(keep_and[:8]))
-    if slug_parts:
+        long_q = " ".join(keep_and[:8])
+        if long_q.lower() != (core or "").lower():
+            queries.append(long_q)
+    if slug_parts and len(slug_parts) >= 2:
         queries.append(" ".join(slug_parts[:8]))
     seen = set()
     unique = []
@@ -467,6 +536,64 @@ def _search_queries(title: str, storefront_url: str | None = None) -> list[str]:
         seen.add(key)
         unique.append(query.strip())
     return unique or [_short_title(title)]
+
+
+def _core_product_query(title: str) -> str:
+    """Brand + model only — drop marketing tails like 'Premium Smartwatch with…'."""
+    cleaned = re.sub(r"[^\w\s+-]", " ", title or "")
+    words = [w for w in cleaned.split() if w.lower() not in (FILLER_WORDS - {"and"})]
+    core: list[str] = []
+    for word in words:
+        key = word.lower()
+        if key in MARKETING_TAIL and len(core) >= 3:
+            break
+        if key in {"premium"} and len(core) >= 3:
+            break
+        core.append(word)
+        # Stop once we have brand + name + a model digit (Samsung Galaxy Watch 5).
+        if len(core) >= 3 and any(ch.isdigit() for ch in word):
+            break
+        if len(core) >= 6:
+            break
+    return " ".join(core)
+
+
+def _model_numbers(text: str) -> set[str]:
+    """Product model digits (Watch 5 / Watch5), ignoring common size numbers."""
+    raw = re.sub(r"([a-zA-Z])(\d)", r"\1 \2", text or "")
+    raw = re.sub(r"(\d)([a-zA-Z])", r"\1 \2", raw)
+    found = set()
+    for token in re.findall(r"\b\d{1,4}\b", raw.lower()):
+        if token in SIZE_NUMBERS:
+            continue
+        # Ignore years.
+        if len(token) == 4 and token.startswith(("19", "20")):
+            continue
+        found.add(token)
+    return found
+
+
+def _url_slug_matches(title: str, url: str, storefront_url: str | None = None) -> bool:
+    path = (urlparse(url).path or "").lower().replace("-", " ").replace("_", " ").replace("/", " ")
+    path = re.sub(r"([a-z])(\d)", r"\1 \2", path)
+    path = re.sub(r"(\d)([a-z])", r"\1 \2", path)
+    path_words = {w for w in path.split() if w}
+    brand = _brand_tokens(title, storefront_url)
+    if brand:
+        hit = len(_canonical_tokens(brand) & path_words)
+        need = 1 if brand & MEGA_BRANDS else min(2, len(brand))
+        rest = brand - MEGA_BRANDS
+        if hit < need and not (rest and rest <= path_words):
+            return False
+    models = _model_numbers(title)
+    if models and not (models & _model_numbers(path)):
+        return False
+    edition = {"pro", "plus", "max", "ultra", "fe"}
+    our_ed = set(_normalize_title(title).split()) & edition
+    path_ed = path_words & edition
+    if models and our_ed != path_ed and (our_ed or path_ed):
+        return False
+    return True
 
 
 def _match_score(ours: str, theirs: str, storefront_url: str | None = None) -> tuple[float, str | None]:
@@ -482,7 +609,26 @@ def _missing_required(ours: str, theirs: str, storefront_url: str | None) -> str
     their_words = set(_normalize_title(theirs).split())
     brand = _brand_tokens(ours, storefront_url)
     their_exp = _canonical_tokens(their_words) | their_words
-    brand_ok = bool(brand) and _canonical_tokens(brand).issubset(their_exp)
+    # Also expand glued tokens (watch5 → watch, 5) for matching.
+    their_exp |= _model_numbers(theirs)
+    their_exp |= set(re.sub(r"([a-z])(\d)", r"\1 \2", " ".join(their_words)).split())
+    brand_ok = _brand_ok(brand, their_exp)
+
+    our_models = _model_numbers(ours)
+    their_models = _model_numbers(theirs)
+    if our_models and not (our_models & their_models):
+        return (
+            "Different product (model mismatch: need "
+            + "/".join(sorted(our_models))
+            + ")"
+        )
+
+    edition = {"pro", "plus", "max", "ultra", "fe"}
+    our_ed = our_words & edition
+    their_ed = their_words & edition
+    # Only enforce editions when a model number is in play (Watch 5 ≠ Watch 5 Pro).
+    if our_models and our_ed != their_ed and (our_ed or their_ed):
+        return "Different product (edition mismatch: " + " ".join(sorted(our_ed | their_ed)) + ")"
 
     missing = []
     for group in TOKEN_GROUPS:
@@ -512,6 +658,22 @@ def _missing_required(ours: str, theirs: str, storefront_url: str | None) -> str
         if overlap < need:
             return f"Different product (only {overlap}/{need} key words match)"
     return None
+
+
+def _brand_ok(brand: set[str], their_exp: set[str]) -> bool:
+    if not brand:
+        return True
+    canon_brand = _canonical_tokens(brand)
+    if canon_brand.issubset(their_exp):
+        return True
+    # Mega-brand + line: "Galaxy Watch 5" without saying Samsung is still OK.
+    mega = brand & MEGA_BRANDS
+    rest = _canonical_tokens(brand - MEGA_BRANDS)
+    if mega and rest and rest.issubset(their_exp):
+        return True
+    if mega and mega.issubset(their_exp) and not rest:
+        return True
+    return False
 
 
 def _brand_tokens(ours: str, storefront_url: str | None) -> set[str]:
@@ -644,10 +806,16 @@ def _is_product_url(url: str) -> bool:
         return False
     if BLOCKED_PATH.search(path):
         return False
+    if PRODUCT_PATH.search(path) or CATEGORY_PDP.search(path):
+        return True
     known = {s.lower() for s in settings.discovery_sites}
     if any(host_cmp.endswith(site) for site in known):
-        return bool(PRODUCT_PATH.search(path))
+        return bool(PRODUCT_PATH.search(path) or CATEGORY_PDP.search(path))
     if settings.DISCOVERY_OPEN_WEB:
+        parts = [p for p in path.split("/") if p]
+        # Hyphenated PDP slug at depth >= 2 (PriceOye-style category trees).
+        if len(parts) >= 2 and "-" in parts[-1] and len(parts[-1]) >= 12:
+            return True
         return bool(PRODUCT_PATH.search(path))
     return False
 

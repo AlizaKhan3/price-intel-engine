@@ -82,12 +82,12 @@ class Settings(BaseSettings):
     GOOGLE_CSE_KEY: str = ""
     DISCOVERY_SITES: str = (
         "homducts.pk,daraz.pk,smartaccessories.pk,apricot.com.pk,"
-        "shopperspk.com,telemart.pk,kiswa.pk"
+        "shopperspk.com,telemart.pk,kiswa.pk,priceoye.pk,fonepro.pk,starcity.pk"
     )
     DISCOVERY_OPEN_WEB: bool = True
-    DISCOVERY_MAX_URLS: int = 6
+    DISCOVERY_MAX_URLS: int = 8
     DISCOVERY_PER_HOST: int = 1
-    DISCOVERY_MIN_SCORE: int = 78
+    DISCOVERY_MIN_SCORE: int = 75
     DISCOVERY_PRICE_MIN_RATIO: float = 0.5
     DISCOVERY_PRICE_MAX_RATIO: float = 2.5
 

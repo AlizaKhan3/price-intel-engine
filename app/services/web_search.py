@@ -26,18 +26,31 @@ SEARCH_UA = (
 def search_web(query: str, max_results: int = 8) -> list[dict]:
     settings = get_settings()
     if settings.SERPER_API_KEY:
-        return _serper(query, max_results, settings.SERPER_API_KEY)
+        try:
+            return _serper(query, max_results, settings.SERPER_API_KEY)
+        except Exception as exc:
+            logger.warning("Serper search failed (%s); falling back", exc)
     if settings.GOOGLE_CSE_ID and settings.GOOGLE_CSE_KEY:
-        return _google_cse(query, max_results, settings.GOOGLE_CSE_ID, settings.GOOGLE_CSE_KEY)
+        try:
+            return _google_cse(query, max_results, settings.GOOGLE_CSE_ID, settings.GOOGLE_CSE_KEY)
+        except Exception as exc:
+            logger.warning("Google CSE search failed (%s); falling back", exc)
+    items: list[dict] = []
     try:
         items = _ddgs(query, max_results)
     except Exception as exc:
         logger.warning("DuckDuckGo package search failed (%s); using HTML fallback", exc)
         items = []
     if len(items) < 2:
-        items = _merge(items, _duckduckgo_html(query, max_results))
+        try:
+            items = _merge(items, _duckduckgo_html(query, max_results))
+        except Exception as exc:
+            logger.warning("DuckDuckGo HTML search failed (%s)", exc)
     if len(items) < 2:
-        items = _merge(items, _bing_html(query, max_results))
+        try:
+            items = _merge(items, _bing_html(query, max_results))
+        except Exception as exc:
+            logger.warning("Bing HTML search failed (%s)", exc)
     return items[:max_results]
 
 
