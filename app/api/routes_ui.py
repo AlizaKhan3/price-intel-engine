@@ -775,7 +775,7 @@ def _automate_page(
     <ol class="steps">
       <li>We search the web for your product title (DuckDuckGo by default; add a Serper/Google key for better results).</li>
       <li>We keep only product <em>pages</em> — not Daraz catalog/search, not social posts.</li>
-      <li>We read title + price, drop weak title matches and crazy price outliers, then compare.</li>
+      <li>We read title + price, drop weak title matches, then compare (large price gaps are kept and flagged).</li>
       <li>Saved URLs refresh on a schedule. CSV import is still there if search misses a shop.</li>
     </ol>
     <div class="panel">

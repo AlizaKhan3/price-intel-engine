@@ -235,21 +235,11 @@ async def _discover_with_product(
                 }
             )
             continue
-        if our_price and not _discovery_price_ok(listing.price, our_price):
-            # Strong title/model hits still count — pasted price can be a fake/outlier
-            # listing (e.g. Watch 5 at Rs. 4,500 vs real market ~60k).
-            if score < 90:
-                skipped.append(
-                    {
-                        "url": url,
-                        "title": listing.title,
-                        "reason": (
-                            f"Price Rs. {listing.price:,.0f} is too far from yours "
-                            f"(Rs. {our_price:,.0f}) — likely a different size or item"
-                        ),
-                    }
-                )
-                continue
+        # Keep title-matched shops even when price is far apart (flash-sale vs
+        # full price, or outlier listings). Flag them instead of dropping.
+        price_outlier = bool(
+            our_price and listing.price and not _discovery_price_ok(listing.price, our_price)
+        )
         auto_approve = score >= (tenant.get("matching") or {}).get(
             "auto_approve_score", settings.MATCH_AUTO_APPROVE_SCORE
         )
@@ -261,6 +251,9 @@ async def _discover_with_product(
             storefront_url=storefront_url,
         )
         row["match_score"] = score
+        row["price_outlier"] = price_outlier
+        if price_outlier and row.get("headline"):
+            row["headline"] = f"{row['headline']} (price gap is large — check size/variant)"
         comparisons.append(row)
         await asyncio.sleep(0)
 
