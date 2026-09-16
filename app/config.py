@@ -73,21 +73,27 @@ class Settings(BaseSettings):
 
     # --- Scraping defaults ---
     SCRAPER_REQUEST_DELAY_SECONDS: float = 2.0
-    SCRAPER_USER_AGENT: str = "PriceIntelBot/1.0 (+mailto:info@sadiq.ai)"
+    SCRAPER_USER_AGENT: str = (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+    )
     ENABLED_COMPETITORS: str = "daraz"
 
     # --- Auto-discovery (web search → product pages, never marketplace search pages) ---
     SERPER_API_KEY: str = ""
     GOOGLE_CSE_ID: str = ""
     GOOGLE_CSE_KEY: str = ""
+    BRAVE_SEARCH_API_KEY: str = ""
+    USD_TO_PKR: float = 278.0
     DISCOVERY_SITES: str = (
         "homducts.pk,daraz.pk,smartaccessories.pk,apricot.com.pk,"
-        "shopperspk.com,telemart.pk,kiswa.pk,priceoye.pk,fonepro.pk,starcity.pk"
+        "shopperspk.com,telemart.pk,kiswa.pk,priceoye.pk,fonepro.pk,starcity.pk,"
+        "highfy.pk,needbazaar.pk,shopaholic.pk"
     )
     DISCOVERY_OPEN_WEB: bool = True
     DISCOVERY_MAX_URLS: int = 8
     DISCOVERY_PER_HOST: int = 1
-    DISCOVERY_MIN_SCORE: int = 70
+    DISCOVERY_MIN_SCORE: int = 65
     DISCOVERY_PRICE_MIN_RATIO: float = 0.5
     DISCOVERY_PRICE_MAX_RATIO: float = 2.5
 

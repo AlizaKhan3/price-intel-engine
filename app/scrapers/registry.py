@@ -6,11 +6,13 @@ new file next to daraz.py (same BaseScraper contract) and registering
 it here — nothing else in the codebase needs to change.
 """
 from app.scrapers.base import BaseScraper
+from app.scrapers.amazon import AmazonScraper
 from app.scrapers.daraz import DarazScraper
 from app.scrapers.generic import GenericPageScraper
 
 SCRAPERS: dict[str, type[BaseScraper]] = {
     "daraz": DarazScraper,
+    "amazon": AmazonScraper,
 }
 
 

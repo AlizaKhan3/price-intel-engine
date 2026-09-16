@@ -400,6 +400,11 @@ TOKEN_CANON = {
     "humidifier": "diffuser",
     "vitamin": "vitamin",
     "vitamins": "vitamin",
+    "toothbrush": "toothbrush",
+    "toothbrushes": "toothbrush",
+    "seasoning": "spice",
+    "spice": "spice",
+    "spices": "spice",
 }
 
 
@@ -471,7 +476,7 @@ async def _search_candidates(
                 if len(found) >= cap:
                     break
 
-    for site in settings.discovery_sites[:10]:
+    for site in settings.discovery_sites[:12]:
         if len(found) >= cap:
             break
         if source_host and site in source_host:
@@ -485,8 +490,26 @@ async def _search_candidates(
                 continue
             ranked.append((score, row))
         ranked.sort(key=lambda pair: pair[0], reverse=True)
-        if ranked and ranked[0][0] >= settings.DISCOVERY_MIN_SCORE:
+        # When web search is empty (common on Railway), accept a weaker Shopify hit.
+        floor = settings.DISCOVERY_MIN_SCORE if found else max(50, settings.DISCOVERY_MIN_SCORE - 15)
+        if ranked and ranked[0][0] >= floor:
             add(ranked[0][1].get("url") or "", ranked[0][1].get("title") or "")
+
+    # Last resort: try every query against Shopify hosts even if scores are soft.
+    if len(found) < 2:
+        for query in queries[:3]:
+            for site in settings.discovery_sites[:12]:
+                if len(found) >= cap:
+                    break
+                if source_host and site in source_host:
+                    continue
+                for row in shopify_products(site, query, limit=3):
+                    score, miss = _match_score(title, row.get("title") or "", storefront_url)
+                    if miss:
+                        continue
+                    if score >= max(50, settings.DISCOVERY_MIN_SCORE - 15):
+                        add(row.get("url") or "", row.get("title") or "")
+                        break
 
     logger.info("Discovery search urls=%s", found)
     return found[:cap]
@@ -495,75 +518,6 @@ async def _search_candidates(
 def _slug_words(storefront_url: str | None) -> list[str]:
     slug = slug_from_any_url(storefront_url or "") or slug_from_storefront_url(storefront_url or "") or ""
     return [word for word in slug.replace("_", "-").split("-") if word and not word.isdigit()]
-
-
-def _search_queries(title: str, storefront_url: str | None = None) -> list[str]:
-    queries: list[str] = []
-    slug_parts = [w for w in _slug_words(storefront_url) if w.lower() not in FILLER_WORDS]
-    blob = f"{title} {storefront_url or ''}".lower()
-    if "train" in blob and "diffuser" in blob:
-        queries.append("mini train shape essential oil diffuser")
-        queries.append("steam train essential oil diffuser")
-    core = _core_product_query(title)
-    if core:
-        queries.append(core)
-    # Keep "and" so we search like a person: "jewelry and perfume organizer".
-    cleaned = re.sub(r"[^\w\s+-]", " ", title or "")
-    keep_and = [
-        w
-        for w in cleaned.split()
-        if w.lower() not in (FILLER_WORDS - {"and"}) and w.lower() not in {"premium"}
-    ]
-    if keep_and:
-        long_q = " ".join(keep_and[:8])
-        if long_q.lower() != (core or "").lower():
-            queries.append(long_q)
-    if slug_parts and len(slug_parts) >= 2:
-        queries.append(" ".join(slug_parts[:8]))
-    seen = set()
-    unique = []
-    for query in queries:
-        key = query.lower().strip()
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        unique.append(query.strip())
-    return unique or [_short_title(title)]
-
-
-def _core_product_query(title: str) -> str:
-    """Brand + model only — drop marketing tails like 'Premium Smartwatch with…'."""
-    cleaned = re.sub(r"[^\w\s+-]", " ", title or "")
-    words = [w for w in cleaned.split() if w.lower() not in (FILLER_WORDS - {"and"})]
-    core: list[str] = []
-    for word in words:
-        key = word.lower()
-        if key in MARKETING_TAIL and len(core) >= 3:
-            break
-        if key in {"premium"} and len(core) >= 3:
-            break
-        core.append(word)
-        # Stop once we have brand + name + a model digit (Samsung Galaxy Watch 5).
-        if len(core) >= 3 and any(ch.isdigit() for ch in word):
-            break
-        if len(core) >= 6:
-            break
-    return " ".join(core)
-
-
-def _model_numbers(text: str) -> set[str]:
-    """Product model digits (Watch 5 / Watch5), ignoring common size numbers."""
-    raw = re.sub(r"([a-zA-Z])(\d)", r"\1 \2", text or "")
-    raw = re.sub(r"(\d)([a-zA-Z])", r"\1 \2", raw)
-    found = set()
-    for token in re.findall(r"\b\d{1,4}\b", raw.lower()):
-        if token in SIZE_NUMBERS:
-            continue
-        # Ignore years.
-        if len(token) == 4 and token.startswith(("19", "20")):
-            continue
-        found.add(token)
-    return found
 
 
 def _url_slug_matches(title: str, url: str, storefront_url: str | None = None) -> bool:
@@ -671,7 +625,7 @@ def _missing_required(ours: str, theirs: str, storefront_url: str | None) -> str
         overlap = len(our_distinct & their_distinct)
         need = 1 if len(our_distinct) <= 2 else max(2, (len(our_distinct) + 2) // 3)
         # Strong brand match: one shared key word is enough (Daily Wish Face Wash).
-        if brand_ok:
+        if brand and brand_ok:
             need = min(need, 1)
         if overlap < need:
             return f"Different product (only {overlap}/{need} key words match)"
@@ -694,8 +648,18 @@ def _brand_ok(brand: set[str], their_exp: set[str]) -> bool:
     return False
 
 
+def _canonical_tokens(words: set[str]) -> set[str]:
+    """Collapse synonyms (jewellery/jewelry, cosmetic/perfume) to one token."""
+    mapped = set()
+    for word in words:
+        mapped.add(TOKEN_CANON.get(word, word))
+    return mapped
+
+
 def _brand_tokens(ours: str, storefront_url: str | None) -> set[str]:
     """First distinctive title tokens — usually the brand/line name (e.g. daily wish)."""
+    # Not brands: product adjectives / category words that generic listings lead with
+    # ("5/6 Modes Electric Toothbrushes…" must not invent brand {modes, electric}).
     weak_prefix = {
         "digital",
         "fast",
@@ -715,23 +679,184 @@ def _brand_tokens(ours: str, storefront_url: str | None) -> set[str]:
         "metal",
         "plastic",
         "clear",
+        "modes",
+        "mode",
+        "rechargeable",
+        "whitening",
+        "waterproof",
+        "silicone",
+        "reusable",
+        "natural",
+        "naturally",
+        "conditioning",
+        "household",
+        "rotating",
+        "premium",
+        "adults",
+        "kids",
+        "women",
+        "womens",
+        "men",
+        "mens",
+        "unisex",
+        "small",
+        "large",
+        "holder",
+        "holders",
+        "brush",
+        "toothbrush",
+        "toothbrushes",
+        "massager",
+        "massage",
+        "roller",
+        "cube",
+        "ice",
+        "face",
+        "eyes",
+        "neck",
+        "skin",
+        "care",
+        "mold",
+        "gas",
+        "body",
+        "spray",
+        "water",
+        "bottle",
+        "tritan",
+        "glass",
+        "jars",
+        "jar",
+        "seasoning",
+        "storage",
+        "rack",
+        "timer",
+        "ipx",
+        "ipx7",
+        "tooth",
     }
     words = [
         w
         for w in _normalize_title(f"{ours} {' '.join(_slug_words(storefront_url))}").split()
-        if w not in GENERIC_WORDS and not w.isdigit() and (len(w) > 1 or w == "c")
+        if w not in GENERIC_WORDS
+        and w not in weak_prefix
+        and not w.isdigit()
+        and (len(w) > 1 or w == "c")
     ]
-    if not words or words[0] in weak_prefix:
+    if not words:
         return set()
     return set(words[:2])
 
 
-def _canonical_tokens(words: set[str]) -> set[str]:
-    """Collapse synonyms (jewellery/jewelry, cosmetic/perfume) to one token."""
-    mapped = set()
+def _model_numbers(text: str) -> set[str]:
+    """Product model digits (Watch 5 / Watch5), ignoring sizes and mode counts."""
+    raw = re.sub(r"([a-zA-Z])(\d)", r"\1 \2", text or "")
+    raw = re.sub(r"(\d)([a-zA-Z])", r"\1 \2", raw)
+    low = raw.lower()
+    found = set()
+    for token in re.findall(r"\b\d{1,4}\b", low):
+        if token in SIZE_NUMBERS:
+            continue
+        if len(token) == 4 and token.startswith(("19", "20")):
+            continue
+        # 150ml / 680ml / 40mm — capacity/size, not model identity.
+        if re.search(rf"\b{re.escape(token)}\s*(ml|g|kg|mm|cm|oz|mah)\b", low):
+            continue
+        # IPX7 waterproof rating.
+        if re.search(rf"\bipx\s*-?\s*{re.escape(token)}\b", low) or f"ipx{token}" in low:
+            continue
+        # "5/6 Modes" or "5-Mode" — feature count, not SKU model.
+        if re.search(
+            rf"\b{re.escape(token)}\s*(?:/\s*\d+\s*)?[- ]?modes?\b",
+            low,
+        ) or re.search(rf"\bmodes?\s*{re.escape(token)}\b", low):
+            continue
+        found.add(token)
+    return found
+
+
+def _product_type_queries(title: str) -> list[str]:
+    """Human search phrases when the listing title is marketing fluff."""
+    low = (title or "").lower()
+    out: list[str] = []
+    brand = _brand_tokens(title, None)
+    brand_s = " ".join(sorted(brand)) if brand else ""
+    phrases = [
+        (("toothbrush", "toothbrushes"), "electric toothbrush"),
+        (("body spray",), "body spray"),
+        (("ice", "roller"), "silicone ice roller face"),
+        (("seasoning", "spice", "jars"), "360 rotating spice rack glass jars"),
+        (("water bottle", "tritan"), "tritan water bottle"),
+    ]
+    for keys, phrase in phrases:
+        if any(k in low for k in keys):
+            out.append(f"{brand_s} {phrase}".strip() if brand_s else phrase)
+    return out
+
+
+def _core_product_query(title: str) -> str:
+    """Brand + model only — drop marketing tails like 'Premium Smartwatch with…'."""
+    type_q = _product_type_queries(title)
+    cleaned = re.sub(r"[^\w\s+-]", " ", title or "")
+    words = [w for w in cleaned.split() if w.lower() not in (FILLER_WORDS - {"and"})]
+    while words and words[0].isdigit():
+        words = words[1:]
+    core: list[str] = []
     for word in words:
-        mapped.add(TOKEN_CANON.get(word, word))
-    return mapped
+        key = word.lower()
+        if key in MARKETING_TAIL and len(core) >= 3:
+            break
+        if key in {"premium"} and len(core) >= 3:
+            break
+        core.append(word)
+        if len(core) >= 3 and any(ch.isdigit() for ch in word):
+            break
+        if len(core) >= 6:
+            break
+    built = " ".join(core)
+    brand = _brand_tokens(title, None)
+    if type_q:
+        # Prefer "Krone body spray" / "electric toothbrush" over marketing cores.
+        if brand:
+            branded = f"{' '.join(sorted(brand))} {type_q[0]}"
+            # Avoid "attitude krone body spray" duplication if type already has brand words.
+            if not any(b in type_q[0].lower() for b in brand):
+                return branded.strip()
+        return type_q[0]
+    return built
+
+
+def _search_queries(title: str, storefront_url: str | None = None) -> list[str]:
+    queries: list[str] = []
+    slug_parts = [w for w in _slug_words(storefront_url) if w.lower() not in FILLER_WORDS]
+    blob = f"{title} {storefront_url or ''}".lower()
+    if "train" in blob and "diffuser" in blob:
+        queries.append("mini train shape essential oil diffuser")
+        queries.append("steam train essential oil diffuser")
+    queries.extend(_product_type_queries(title))
+    core = _core_product_query(title)
+    if core:
+        queries.append(core)
+    cleaned = re.sub(r"[^\w\s+-]", " ", title or "")
+    keep_and = [
+        w
+        for w in cleaned.split()
+        if w.lower() not in (FILLER_WORDS - {"and"}) and w.lower() not in {"premium"}
+    ]
+    if keep_and:
+        long_q = " ".join(keep_and[:8])
+        if long_q.lower() != (core or "").lower():
+            queries.append(long_q)
+    if slug_parts and len(slug_parts) >= 2:
+        queries.append(" ".join(slug_parts[:8]))
+    seen = set()
+    unique = []
+    for query in queries:
+        key = query.lower().strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        unique.append(query.strip())
+    return unique or [_short_title(title)]
 
 
 def _discovery_price_ok(theirs: float, ours: float) -> bool:

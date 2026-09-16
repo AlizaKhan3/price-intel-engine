@@ -66,7 +66,16 @@ async def scrape_url_as_our_product(tenant: dict, product_url: str) -> dict:
         "source": "external_scrape",
         "synced_at": datetime.utcnow(),
     }
-    if not product["title"] or product["price"] <= 0:
+    if not product["title"]:
+        raise ValueError(
+            "Could not read a title from that page. "
+            "Try another product URL, or a more specific product-details link."
+        )
+    if product["price"] <= 1 and competitor == "amazon":
+        # Amazon blocked the price widget — still searchable by title in PK shops.
+        product["price"] = float(getattr(get_settings(), "USD_TO_PKR", 278) or 278)
+        product["price_estimated"] = True
+    if product["price"] <= 0:
         raise ValueError(
             "Could not read a title and price from that page. "
             "Try another product URL, or a more specific product-details link."
@@ -89,7 +98,12 @@ async def fetch_competitor_listings(
     results: list[tuple[str, CompetitorListing | None, str | None]] = []
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
-        page = await browser.new_page(user_agent=settings.SCRAPER_USER_AGENT)
+        context = await browser.new_context(
+            user_agent=settings.SCRAPER_USER_AGENT,
+            locale="en-US",
+            extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
+        )
+        page = await context.new_page()
         try:
             for i, (competitor, url) in enumerate(pairs):
                 try:
@@ -101,8 +115,9 @@ async def fetch_competitor_listings(
                 if i < len(pairs) - 1:
                     await asyncio.sleep(settings.SCRAPER_REQUEST_DELAY_SECONDS)
         finally:
+            await context.close()
             await browser.close()
-    return results
+        return results
 
 
 async def compare_storefront_and_competitor(

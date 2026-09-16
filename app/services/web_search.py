@@ -31,6 +31,11 @@ def search_web(query: str, max_results: int = 8) -> list[dict]:
             items = _serper(query, max_results, settings.SERPER_API_KEY)
         except Exception as exc:
             logger.warning("Serper search failed (%s); falling back", exc)
+    if len(items) < max_results and getattr(settings, "BRAVE_SEARCH_API_KEY", ""):
+        try:
+            items = _merge(items, _brave(query, max_results, settings.BRAVE_SEARCH_API_KEY))
+        except Exception as exc:
+            logger.warning("Brave search failed (%s); falling back", exc)
     if len(items) < max_results and settings.GOOGLE_CSE_ID and settings.GOOGLE_CSE_KEY:
         try:
             items = _merge(items, _google_cse(query, max_results, settings.GOOGLE_CSE_ID, settings.GOOGLE_CSE_KEY))
@@ -44,9 +49,10 @@ def search_web(query: str, max_results: int = 8) -> list[dict]:
     # Railway/datacenter IPs often get empty Yahoo/DDG package results — keep
     # trying HTML backends until we have enough links.
     for name, fetcher in (
-        ("duckduckgo_html", _duckduckgo_html),
         ("duckduckgo_lite", _ddg_lite),
+        ("duckduckgo_html", _duckduckgo_html),
         ("bing_html", _bing_html),
+        ("google_html", _google_html),
     ):
         if len(items) >= max_results:
             break
@@ -91,6 +97,8 @@ def search_provider() -> str:
     settings = get_settings()
     if settings.SERPER_API_KEY:
         return "serper"
+    if getattr(settings, "BRAVE_SEARCH_API_KEY", ""):
+        return "brave"
     if settings.GOOGLE_CSE_ID and settings.GOOGLE_CSE_KEY:
         return "google_cse"
     return "duckduckgo"
@@ -107,6 +115,22 @@ def _serper(query: str, max_results: int, api_key: str) -> list[dict]:
     items = []
     for row in (response.json().get("organic") or [])[:max_results]:
         url = row.get("link")
+        if url:
+            items.append({"title": row.get("title") or "", "url": url})
+    return items
+
+
+def _brave(query: str, max_results: int, api_key: str) -> list[dict]:
+    response = httpx.get(
+        "https://api.search.brave.com/res/v1/web/search",
+        params={"q": query, "count": max_results, "country": "PK", "search_lang": "en"},
+        headers={"Accept": "application/json", "X-Subscription-Token": api_key},
+        timeout=20,
+    )
+    response.raise_for_status()
+    items = []
+    for row in ((response.json().get("web") or {}).get("results") or [])[:max_results]:
+        url = row.get("url")
         if url:
             items.append({"title": row.get("title") or "", "url": url})
     return items
@@ -236,6 +260,53 @@ def _bing_html(query: str, max_results: int) -> list[dict]:
         items.append({"title": title, "url": url})
         if len(items) >= max_results:
             break
+    return items
+
+
+def _google_html(query: str, max_results: int) -> list[dict]:
+    """Best-effort Google HTML parse — often the only backend that still works on Railway."""
+    response = httpx.get(
+        "https://www.google.com/search",
+        params={"q": query, "hl": "en", "gl": "pk", "num": max_results},
+        headers={
+            "User-Agent": SEARCH_UA,
+            "Accept-Language": "en-US,en;q=0.9",
+        },
+        timeout=20,
+        follow_redirects=True,
+    )
+    response.raise_for_status()
+    items = []
+    seen = set()
+    for match in re.finditer(
+        r'<a[^>]+href="/url\?q=(https?://[^"&]+)[^"]*"[^>]*>(.*?)</a>',
+        response.text,
+        re.I | re.S,
+    ):
+        url = unquote(match.group(1))
+        if url in seen or any(b in url for b in ("google.", "youtube.", "accounts.")):
+            continue
+        seen.add(url)
+        title = re.sub(r"<[^>]+>", "", unescape(match.group(2))).strip()
+        if not title:
+            continue
+        items.append({"title": title, "url": url})
+        if len(items) >= max_results:
+            break
+    if len(items) < max_results:
+        for match in re.finditer(
+            r'<a[^>]+href="(https?://[^"]+)"[^>]*><h3[^>]*>(.*?)</h3>',
+            response.text,
+            re.I | re.S,
+        ):
+            url = unescape(match.group(1))
+            if url in seen or "google." in url:
+                continue
+            seen.add(url)
+            title = re.sub(r"<[^>]+>", "", unescape(match.group(2))).strip()
+            items.append({"title": title, "url": url})
+            if len(items) >= max_results:
+                break
     return items
 
 
