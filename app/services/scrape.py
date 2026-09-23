@@ -12,6 +12,7 @@ from app.models.product import MatchStatus, MatchTier
 from app.scrapers.registry import get_scraper
 from app.services.catalog_sync import sync_full_catalog
 from app.services.compare_summary import explain_prices
+from app.services.markets import Market, convert_amount
 from app.services.matching.pipeline import find_best_match
 from app.services.tenants import tenant_id as tid
 from app.services.urls import (
@@ -35,7 +36,12 @@ async def fetch_competitor_listing(competitor: str, competitor_url: str) -> Comp
     return listing
 
 
-async def scrape_url_as_our_product(tenant: dict, product_url: str) -> dict:
+async def scrape_url_as_our_product(
+    tenant: dict,
+    product_url: str,
+    *,
+    market: Market | None = None,
+) -> dict:
     """
     Read title + price from any product page and store it as a catalog row.
 
@@ -51,12 +57,23 @@ async def scrape_url_as_our_product(tenant: dict, product_url: str) -> dict:
     listing = await fetch_competitor_listing(competitor, clean)
     product_id = external_product_id(clean)
     shop = competitor_label(listing.competitor)
+    listing_currency = (listing.currency or "").upper() or (market.currency if market else "USD")
+    price = float(listing.price or 0)
+    # Align listing currency to market when we need a common compare currency.
+    if market and listing_currency != market.currency and price > 0.01:
+        price = convert_amount(price, listing_currency, market.currency)
+        product_currency = market.currency
+        converted_from = listing_currency
+    else:
+        product_currency = listing_currency if listing_currency else (market.currency if market else "USD")
+        converted_from = None
+
     product = {
         "tenant_id": tenant_key,
         "id": product_id,
         "title": listing.title.strip(),
-        "price": float(listing.price or 0),
-        "currency": "PKR",
+        "price": price,
+        "currency": product_currency,
         "marketplace": shop,
         "marketplace_id": listing.competitor,
         "url": listing.url or clean,
@@ -65,16 +82,22 @@ async def scrape_url_as_our_product(tenant: dict, product_url: str) -> dict:
         "in_stock": bool(listing.in_stock) if listing.in_stock is not None else True,
         "source": "external_scrape",
         "synced_at": datetime.utcnow(),
+        "market_code": market.code if market else None,
     }
+    if converted_from:
+        product["original_currency"] = converted_from
+        product["original_price"] = float(listing.price or 0)
     if not product["title"]:
         raise ValueError(
             "Could not read a title from that page. "
             "Try another product URL, or a more specific product-details link."
         )
-    if product["price"] <= 1 and competitor == "amazon":
-        # Amazon blocked the price widget — still searchable by title in PK shops.
-        product["price"] = float(getattr(get_settings(), "USD_TO_PKR", 278) or 278)
+    if product["price"] <= 0.05 and competitor == "amazon":
+        # Amazon blocked the price widget — keep a tiny placeholder so search can run.
         product["price_estimated"] = True
+        if market:
+            product["price"] = 1.0
+            product["currency"] = market.currency
     if product["price"] <= 0:
         raise ValueError(
             "Could not read a title and price from that page. "
@@ -241,11 +264,17 @@ async def attach_listing(
 
     their_name = competitor_label(saved.get("competitor") or competitor)
     our_name = product.get("marketplace") or tenant.get("name") or "Your store"
+    market_code = product.get("market_code")
+    from app.services.markets import get_market
+
+    market = get_market(market_code) if market_code else None
     explained = explain_prices(
         product.get("price") or 0,
         saved.get("price") or 0,
         our_label=our_name,
         competitor_label=their_name,
+        market=market,
+        currency=product.get("currency") or (market.currency if market else None),
     )
 
     comparison = {
@@ -286,6 +315,9 @@ async def attach_listing(
             "id": product["id"],
             "title": product.get("title"),
             "price": product.get("price"),
+            "currency": product.get("currency"),
+            "original_price": product.get("original_price"),
+            "original_currency": product.get("original_currency"),
             "marketplace": product.get("marketplace"),
             "url": storefront_url or product.get("url"),
         },
@@ -294,7 +326,14 @@ async def attach_listing(
             "competitor": saved.get("competitor"),
             "title": saved.get("title"),
             "price": saved.get("price"),
+            "currency": saved.get("currency") or product.get("currency"),
             "url": saved.get("url"),
+        },
+        "market": {
+            "code": market.code if market else None,
+            "country": market.country if market else None,
+            "flag": market.flag if market else None,
+            "currency": product.get("currency") or (market.currency if market else None),
         },
         "match": {
             "confidence": decision.get("confidence"),

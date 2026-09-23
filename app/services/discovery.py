@@ -26,6 +26,7 @@ from app.services.urls import (
     slug_from_storefront_url,
 )
 from app.services.web_search import search_provider, search_web, shopify_products
+from app.services.markets import Market, get_market
 from rapidfuzz import fuzz
 
 logger = logging.getLogger(__name__)
@@ -112,7 +113,13 @@ MARKETING_TAIL = frozenset(
 )
 
 
-async def discover_from_storefront(tenant: dict, storefront_url: str) -> dict:
+async def discover_from_storefront(
+    tenant: dict,
+    storefront_url: str,
+    *,
+    market: Market | None = None,
+    market_code: str | None = None,
+) -> dict:
     """
     Paste any product URL → find the same item elsewhere → compare prices.
 
@@ -120,13 +127,16 @@ async def discover_from_storefront(tenant: dict, storefront_url: str) -> dict:
     Any other product page is scraped for title/price first.
     """
     url = (storefront_url or "").strip()
+    resolved = market or get_market(market_code)
     if is_catalog_storefront_url(url):
         try:
             product_id = product_id_from_storefront_url(url)
-            return await discover_product(tenant, product_id, storefront_url=url)
+            return await discover_product(
+                tenant, product_id, storefront_url=url, market=resolved
+            )
         except ValueError:
             pass
-    return await discover_from_external_url(tenant, url)
+    return await discover_from_external_url(tenant, url, market=resolved)
 
 
 async def discover_from_external_url(
@@ -134,14 +144,16 @@ async def discover_from_external_url(
     product_url: str,
     *,
     max_urls: int | None = None,
+    market: Market | None = None,
 ) -> dict:
-    product = await scrape_url_as_our_product(tenant, product_url)
+    product = await scrape_url_as_our_product(tenant, product_url, market=market)
     return await _discover_with_product(
         tenant,
         product,
         storefront_url=product_url,
         max_urls=max_urls,
         exclude_host=_host(product_url),
+        market=market,
     )
 
 
@@ -151,6 +163,7 @@ async def discover_product(
     *,
     storefront_url: str | None = None,
     max_urls: int | None = None,
+    market: Market | None = None,
 ) -> dict:
     db = get_priceintel_db()
     key = tid(tenant)
@@ -159,12 +172,15 @@ async def discover_product(
     product = await db.catalog_products.find_one({"tenant_id": key, "id": product_id})
     if not product:
         raise ValueError(f"Product {product_id} was not found in the catalog.")
+    if market:
+        product = {**product, "market_code": market.code, "currency": product.get("currency") or market.currency}
     return await _discover_with_product(
         tenant,
         product,
         storefront_url=storefront_url or product.get("url"),
         max_urls=max_urls,
         exclude_host=_host(storefront_url or product.get("url") or ""),
+        market=market,
     )
 
 
@@ -175,16 +191,19 @@ async def _discover_with_product(
     storefront_url: str | None = None,
     max_urls: int | None = None,
     exclude_host: str | None = None,
+    market: Market | None = None,
 ) -> dict:
     title = (product.get("title") or "").strip()
     if not title:
         raise ValueError("That product has no title to search with.")
 
+    market = market or get_market(product.get("market_code"))
     candidates = await _search_candidates(
         title,
         max_urls=max_urls,
         storefront_url=storefront_url or product.get("url"),
         exclude_host=exclude_host,
+        market=market,
     )
     skipped = []
     comparisons = []
@@ -198,7 +217,7 @@ async def _discover_with_product(
                 ),
             }
         )
-        return _pack(product, comparisons, skipped, storefront_url, [])
+        return _pack(product, comparisons, skipped, storefront_url, [], market=market)
 
     fetched = await fetch_competitor_listings(
         [(competitor_from_url(url), url) for url in candidates]
@@ -206,6 +225,7 @@ async def _discover_with_product(
     min_score = settings.DISCOVERY_MIN_SCORE
     our_price = product.get("price") or 0
     our_host = exclude_host or _host(storefront_url or product.get("url") or "")
+    market_currency = market.currency if market else (product.get("currency") or "USD")
 
     for url, listing, error in fetched:
         if error or listing is None:
@@ -214,6 +234,13 @@ async def _discover_with_product(
         if our_host and _host(url) == our_host:
             skipped.append({"url": url, "reason": "Same shop as your pasted link"})
             continue
+        # Align competitor price into the compare market currency.
+        from app.services.markets import convert_amount
+
+        listing_cur = (listing.currency or market_currency).upper()
+        if listing_cur != market_currency and listing.price:
+            listing.price = convert_amount(listing.price, listing_cur, market_currency)
+        listing.currency = market_currency
         score, miss = _match_score(title, listing.title, storefront_url or product.get("url"))
         if miss:
             skipped.append(
@@ -259,7 +286,7 @@ async def _discover_with_product(
 
     comparisons = _one_per_shop(comparisons)[: settings.DISCOVERY_MAX_URLS]
     comparisons.sort(key=lambda row: (row.get("competitor_listing") or {}).get("price") or 9e9)
-    return _pack(product, comparisons, skipped, storefront_url, candidates)
+    return _pack(product, comparisons, skipped, storefront_url, candidates, market=market)
 
 
 async def discover_unmapped(tenant: dict, limit: int = 3) -> dict:
@@ -413,6 +440,7 @@ async def _search_candidates(
     max_urls: int | None = None,
     storefront_url: str | None = None,
     exclude_host: str | None = None,
+    market: Market | None = None,
 ) -> list[str]:
     cap = max_urls or settings.DISCOVERY_MAX_URLS
     per_host = max(1, settings.DISCOVERY_PER_HOST)
@@ -421,12 +449,14 @@ async def _search_candidates(
     seen_url: set[str] = set()
     seen_host: dict[str, int] = {}
     source_host = (exclude_host or _host(storefront_url or "")).lower()
+    sites = list(market.discovery_sites) if market and market.discovery_sites else settings.discovery_sites
+    locale = (market.query_locale if market else "Pakistan") or ""
 
     def add(url: str, snippet_title: str = "") -> None:
         clean = _canonical_url(url)
         if not clean or clean in seen_url:
             return
-        if not _is_product_url(clean):
+        if not _is_product_url(clean, market=market):
             return
         host = _host(clean)
         if source_host and (host == source_host or host.endswith("." + source_host) or source_host.endswith("." + host)):
@@ -434,7 +464,6 @@ async def _search_candidates(
         if snippet_title:
             score, miss = _match_score(title, snippet_title, storefront_url)
             if miss or score < max(50, settings.DISCOVERY_MIN_SCORE - 18):
-                # Snippet titles are often truncated; URL slug can still be a hit.
                 if not _url_slug_matches(title, clean, storefront_url):
                     return
         elif not _url_slug_matches(title, clean, storefront_url):
@@ -445,27 +474,28 @@ async def _search_candidates(
         seen_host[host] = seen_host.get(host, 0) + 1
         found.append(clean)
 
-    logger.info("Discovery queries=%s exclude_host=%s", queries, source_host or None)
-    # Open web first so Shopify "best fuzzy organizer" does not crowd out real matches.
+    logger.info("Discovery queries=%s exclude_host=%s market=%s", queries, source_host or None, market.code if market else None)
     for query in queries[:3]:
         if len(found) >= cap:
             break
-        for row in await asyncio.to_thread(search_web, f"{query} Pakistan buy", 12):
+        q_buy = f"{query} {locale} buy".strip() if locale else f"{query} buy"
+        q_plain = f"{query} {locale}".strip() if locale else query
+        for row in await asyncio.to_thread(search_web, q_buy, 12, market):
             add(row.get("url") or "", row.get("title") or "")
             if len(found) >= cap:
                 break
         if len(found) >= cap:
             break
-        for row in await asyncio.to_thread(search_web, f"{query} Pakistan", 12):
+        for row in await asyncio.to_thread(search_web, q_plain, 12, market):
             add(row.get("url") or "", row.get("title") or "")
             if len(found) >= cap:
                 break
 
-    if len(found) < cap:
+    if len(found) < cap and queries:
         site_rows = await asyncio.gather(
             *[
-                asyncio.to_thread(search_web, f"{queries[0]} site:{site}", 6)
-                for site in settings.discovery_sites
+                asyncio.to_thread(search_web, f"{queries[0]} site:{site}", 6, market)
+                for site in sites
             ]
         )
         for rows in site_rows:
@@ -476,7 +506,7 @@ async def _search_candidates(
                 if len(found) >= cap:
                     break
 
-    for site in settings.discovery_sites[:12]:
+    for site in sites[:12]:
         if len(found) >= cap:
             break
         if source_host and site in source_host:
@@ -490,15 +520,13 @@ async def _search_candidates(
                 continue
             ranked.append((score, row))
         ranked.sort(key=lambda pair: pair[0], reverse=True)
-        # When web search is empty (common on Railway), accept a weaker Shopify hit.
         floor = settings.DISCOVERY_MIN_SCORE if found else max(50, settings.DISCOVERY_MIN_SCORE - 15)
         if ranked and ranked[0][0] >= floor:
             add(ranked[0][1].get("url") or "", ranked[0][1].get("title") or "")
 
-    # Last resort: try every query against Shopify hosts even if scores are soft.
-    if len(found) < 2:
+    if len(found) < 2 and queries:
         for query in queries[:3]:
-            for site in settings.discovery_sites[:12]:
+            for site in sites[:12]:
                 if len(found) >= cap:
                     break
                 if source_host and site in source_host:
@@ -952,13 +980,15 @@ def _normalize_title(title: str) -> str:
     return " ".join(words)
 
 
-def _is_product_url(url: str) -> bool:
+def _is_product_url(url: str, market: Market | None = None) -> bool:
     parsed = urlparse(url)
     host = (parsed.hostname or "").lower()
     path = parsed.path or "/"
     host_cmp = host[4:] if host.startswith("www.") else host
     if any(part in host for part in BLOCKED_HOST_PARTS):
         return False
+    if "amazon." in host_cmp:
+        return bool(re.search(r"/(dp|gp/product)/[A-Z0-9]{10}", path, re.I))
     if host_cmp.endswith("daraz.pk"):
         return "/products/" in path.lower()
     if SHOP_INDEX.search(path):
@@ -967,19 +997,23 @@ def _is_product_url(url: str) -> bool:
         return False
     if PRODUCT_PATH.search(path) or CATEGORY_PDP.search(path):
         return True
-    known = {s.lower() for s in settings.discovery_sites}
+    sites = list(market.discovery_sites) if market and market.discovery_sites else settings.discovery_sites
+    known = {s.lower() for s in sites}
     if any(host_cmp.endswith(site) for site in known):
         return bool(PRODUCT_PATH.search(path) or CATEGORY_PDP.search(path))
     if settings.DISCOVERY_OPEN_WEB:
         parts = [p for p in path.split("/") if p]
-        # Hyphenated PDP slug at depth >= 2 (PriceOye-style category trees).
         if len(parts) >= 2 and "-" in parts[-1] and len(parts[-1]) >= 12:
             return True
         return bool(PRODUCT_PATH.search(path))
     return False
 
 
-def _pack(product, comparisons, skipped, storefront_url, searched) -> dict:
+def _pack(product, comparisons, skipped, storefront_url, searched, market: Market | None = None) -> dict:
+    from app.services.markets import format_money
+
+    market = market or get_market(product.get("market_code"))
+    currency = product.get("currency") or (market.currency if market else "USD")
     cheapest = comparisons[0] if comparisons else None
     shops = len(comparisons)
     if cheapest:
@@ -987,8 +1021,9 @@ def _pack(product, comparisons, skipped, storefront_url, searched) -> dict:
         cheap_price = (cheapest.get("competitor_listing") or {}).get("price")
         headline = cheapest.get("headline") or ""
         detail = (
-            f"Compared {shops} shops. Cheapest is {cheap_name} at Rs. {cheap_price:,.0f}. "
-            f"Your price is Rs. {(product.get('price') or 0):,.0f}."
+            f"Compared {shops} shops. Cheapest is {cheap_name} at "
+            f"{format_money(cheap_price, market, currency=currency)}. "
+            f"Your price is {format_money(product.get('price') or 0, market, currency=currency)}."
         )
     else:
         headline = "No matching product pages were found. Try a more specific title, or paste a competitor URL."
@@ -1000,8 +1035,18 @@ def _pack(product, comparisons, skipped, storefront_url, searched) -> dict:
             "id": product["id"],
             "title": product.get("title"),
             "price": product.get("price"),
+            "currency": currency,
+            "original_price": product.get("original_price"),
+            "original_currency": product.get("original_currency"),
             "marketplace": product.get("marketplace"),
             "url": storefront_url or product.get("url"),
+        },
+        "market": {
+            "code": market.code if market else None,
+            "country": market.country if market else None,
+            "flag": market.flag if market else None,
+            "currency": currency,
+            "label": market.label if market else None,
         },
         "searched_urls": searched,
         "matches": comparisons,
@@ -1010,5 +1055,7 @@ def _pack(product, comparisons, skipped, storefront_url, searched) -> dict:
         "headline": headline,
         "cheaper": (cheapest or {}).get("cheaper"),
         "difference_rs": (cheapest or {}).get("difference_rs"),
+        "difference": (cheapest or {}).get("difference") or (cheapest or {}).get("difference_rs"),
+        "currency": currency,
         "detail": detail,
     }

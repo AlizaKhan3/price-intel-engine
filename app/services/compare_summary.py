@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-"""Human-readable price comparison."""
+"""Human-readable price comparison (market-aware currency)."""
+
+from app.services.markets import Market, format_money
 
 
 def explain_prices(
@@ -9,26 +11,36 @@ def explain_prices(
     *,
     our_label: str = "Your store",
     competitor_label: str = "Competitor",
+    market: Market | None = None,
+    currency: str | None = None,
 ) -> dict:
     our = float(our_price or 0)
     theirs = float(competitor_price or 0)
     difference = round(our - theirs, 2)
+    cur = currency or (market.currency if market else "USD")
+
+    def money(amount: float) -> str:
+        return format_money(amount, market, currency=cur)
 
     if our <= 0 or theirs <= 0:
         return {
             "cheaper": None,
             "difference_rs": None,
+            "difference": None,
+            "currency": cur,
             "gap_pct": 0,
             "headline": "Cannot compare — one of the prices is missing or zero.",
-            "detail": f"{our_label}: Rs. {our:,.0f}. {competitor_label}: Rs. {theirs:,.0f}.",
+            "detail": f"{our_label}: {money(our)}. {competitor_label}: {money(theirs)}.",
         }
 
-    if abs(difference) < 1:
+    if abs(difference) < 0.01 if cur != "PKR" else abs(difference) < 1:
         return {
             "cheaper": "tie",
             "difference_rs": 0,
+            "difference": 0,
+            "currency": cur,
             "gap_pct": 0,
-            "headline": f"Same price. Both charge Rs. {our:,.0f}.",
+            "headline": f"Same price. Both charge {money(our)}.",
             "detail": f"{our_label} and {competitor_label} are even.",
         }
 
@@ -37,13 +49,15 @@ def explain_prices(
         return {
             "cheaper": "competitor",
             "difference_rs": difference,
+            "difference": difference,
+            "currency": cur,
             "gap_pct": gap_pct,
             "headline": (
-                f"{competitor_label} is cheaper by Rs. {difference:,.0f} ({gap_pct}%)."
+                f"{competitor_label} is cheaper by {money(difference)} ({gap_pct}%)."
             ),
             "detail": (
-                f"{our_label} sells at Rs. {our:,.0f}. "
-                f"{competitor_label} sells at Rs. {theirs:,.0f}."
+                f"{our_label} sells at {money(our)}. "
+                f"{competitor_label} sells at {money(theirs)}."
             ),
         }
 
@@ -52,10 +66,12 @@ def explain_prices(
     return {
         "cheaper": "us",
         "difference_rs": save,
+        "difference": save,
+        "currency": cur,
         "gap_pct": gap_pct,
-        "headline": f"{our_label} is cheaper by Rs. {save:,.0f} ({gap_pct}%).",
+        "headline": f"{our_label} is cheaper by {money(save)} ({gap_pct}%).",
         "detail": (
-            f"{our_label} sells at Rs. {our:,.0f}. "
-            f"{competitor_label} sells at Rs. {theirs:,.0f}."
+            f"{our_label} sells at {money(our)}. "
+            f"{competitor_label} sells at {money(theirs)}."
         ),
     }
