@@ -172,6 +172,9 @@ async def scrape_url_as_our_product(
         product["price_unknown"] = True
         product.pop("original_price", None)
         product.pop("original_currency", None)
+    else:
+        # A later successful read must clear an older unknown flag.
+        product["price_unknown"] = False
     await db.catalog_products.update_one(
         {"tenant_id": tenant_key, "id": product_id},
         {"$set": product},
