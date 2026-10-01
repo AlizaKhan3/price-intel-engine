@@ -334,7 +334,7 @@ def _page(
     <p class="lede">Paste any product page link (Daraz, Amazon, Shein, Sadiq, or any shop). Leave the competitor box empty —
     we read the title and price, search the web in your country/market, and compare matching shops.</p>
     {_market_banner(market, market_source, currency)}
-    <form method="post" action="/compare" onsubmit="return startCompare(this);">
+    <form method="post" action="/compare" id="compare-form" onsubmit="return startCompare(this);">
       <div>
         <label>Your name (optional — for internal usage log)
           <input name="actor" placeholder="e.g. Ali" value="{_esc(actor)}"/>
@@ -348,7 +348,7 @@ def _page(
       </div>
       <div>
         <label id="market-label">{_market_label(market, market_source)}
-          <select name="market_code" id="market_code">
+          <select name="market_code" id="market_code" onchange="syncMarketBanner()">
             <option value="">— Select country / marketplace —</option>
             {_market_options(market_code or (market.code if market else ""))}
           </select>
@@ -376,25 +376,54 @@ def _page(
   </main>
   <script>
     var MARKET_HINTS = {_market_hints_json()};
+    var compareStepTimer = null;
+    function syncMarketBanner() {{
+      var sel = document.getElementById("market_code");
+      var note = document.querySelector(".market-note.warn");
+      if (sel && sel.value && note) note.style.display = "none";
+    }}
+    function resetCompareUi(form) {{
+      var btn = form && form.querySelector("button[type=submit]");
+      if (btn) {{
+        btn.disabled = false;
+        btn.textContent = "Find matches and compare";
+      }}
+      var loading = document.getElementById("loading");
+      if (loading) loading.classList.add("hidden");
+      if (compareStepTimer) {{
+        clearInterval(compareStepTimer);
+        compareStepTimer = null;
+      }}
+    }}
     function hintMarket(url) {{
+      if (!url) return;
       try {{
         var host = (new URL(url)).hostname.replace(/^www\\./, "").toLowerCase();
       }} catch (e) {{ return; }}
       var sel = document.getElementById("market_code");
       var label = document.getElementById("market-label");
-      if (!sel || sel.value) return;
+      if (!sel) return;
+      if (sel.value) {{
+        syncMarketBanner();
+        return;
+      }}
       for (var i = 0; i < MARKET_HINTS.length; i++) {{
         var row = MARKET_HINTS[i];
         if (host === row.host || host.endsWith("." + row.host) || host.endsWith(row.host)) {{
           sel.value = row.code;
           if (label) label.childNodes[0].textContent = "Country detected: " + row.label + " (change anytime) ";
+          syncMarketBanner();
           return;
         }}
       }}
     }}
     function startCompare(form) {{
-      var btn = form.querySelector("button");
+      var btn = form.querySelector("button[type=submit]");
       hintMarket((form.storefront_url && form.storefront_url.value) || "");
+      if (!form.market_code || !form.market_code.value) {{
+        alert("Select your country/marketplace first.");
+        return false;
+      }}
       btn.disabled = true;
       btn.textContent = "Comparing…";
       var results = document.getElementById("results");
@@ -409,12 +438,49 @@ def _page(
       ];
       var i = 0;
       var el = document.getElementById("loading-step");
-      setInterval(function () {{
+      if (compareStepTimer) clearInterval(compareStepTimer);
+      compareStepTimer = setInterval(function () {{
         i = (i + 1) % steps.length;
         if (el) el.textContent = steps[i];
       }}, 2800);
-      return true;
+
+      var fd = new FormData(form);
+      var controller = new AbortController();
+      var kill = setTimeout(function () {{ controller.abort(); }}, 180000);
+      fetch(form.action || "/compare", {{
+        method: "POST",
+        body: fd,
+        signal: controller.signal,
+        credentials: "same-origin",
+        headers: {{ "Accept": "text/html" }}
+      }}).then(function (res) {{
+        return res.text().then(function (html) {{
+          clearTimeout(kill);
+          document.open();
+          document.write(html);
+          document.close();
+        }});
+      }}).catch(function (err) {{
+        clearTimeout(kill);
+        resetCompareUi(form);
+        if (results) results.classList.remove("hidden");
+        var msg = (err && err.name === "AbortError")
+          ? "Comparison timed out. Try again, or paste a shorter product URL."
+          : ("Could not reach the server: " + (err && err.message ? err.message : "network error"));
+        if (results) {{
+          results.innerHTML = '<div class="banner err">' + msg + "</div>" + results.innerHTML;
+        }} else {{
+          alert(msg);
+        }}
+      }});
+      return false;
     }}
+    window.addEventListener("pageshow", function () {{
+      var form = document.getElementById("compare-form");
+      if (form) resetCompareUi(form);
+      hintMarket((form && form.storefront_url && form.storefront_url.value) || "");
+      syncMarketBanner();
+    }});
   </script>
 </body>
 </html>"""

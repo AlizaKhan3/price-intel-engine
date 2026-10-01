@@ -114,33 +114,73 @@ async def scrape_url_as_our_product(
 async def fetch_competitor_listings(
     pairs: list[tuple[str, str]],
 ) -> list[tuple[str, CompetitorListing | None, str | None]]:
-    """Open one browser and fetch many product pages."""
+    """Open one browser and fetch many product pages.
+
+    Amazon uses HTTP first (Playwright Chromium often OOMs/crashes on Railway).
+    """
     from playwright.async_api import async_playwright
 
+    from app.scrapers.amazon import AmazonScraper, listing_from_url_only
+
     settings = get_settings()
-    results: list[tuple[str, CompetitorListing | None, str | None]] = []
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context(
-            user_agent=settings.SCRAPER_USER_AGENT,
-            locale="en-US",
-            extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
-        )
-        page = await context.new_page()
-        try:
-            for i, (competitor, url) in enumerate(pairs):
-                try:
-                    listing = await get_scraper(competitor).fetch_product(page, url)
-                    results.append((url, listing, None if listing else "No title/price on that page"))
-                except Exception as exc:
-                    logger.warning("Fetch failed %s: %s", url, exc)
-                    results.append((url, None, str(exc)))
-                if i < len(pairs) - 1:
-                    await asyncio.sleep(settings.SCRAPER_REQUEST_DELAY_SECONDS)
-        finally:
-            await context.close()
-            await browser.close()
-        return results
+    # Preserve input order.
+    slots: list[tuple[str, CompetitorListing | None, str | None] | None] = [None] * len(pairs)
+    pending: list[tuple[int, str, str]] = []
+
+    for idx, (competitor, url) in enumerate(pairs):
+        if competitor == "amazon":
+            try:
+                listing = await AmazonScraper().fetch_product_http(url)
+                if listing and listing.title:
+                    slots[idx] = (url, listing, None)
+                    continue
+            except Exception as exc:
+                logger.warning("Amazon HTTP pre-fetch failed %s: %s", url, exc)
+        pending.append((idx, competitor, url))
+
+    if pending:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(
+                headless=True,
+                args=[
+                    "--disable-dev-shm-usage",
+                    "--no-sandbox",
+                    "--disable-gpu",
+                    "--disable-software-rasterizer",
+                ],
+            )
+            context = await browser.new_context(
+                user_agent=settings.SCRAPER_USER_AGENT,
+                locale="en-US",
+                extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
+            )
+            page = await context.new_page()
+            try:
+                for i, (idx, competitor, url) in enumerate(pending):
+                    try:
+                        listing = await get_scraper(competitor).fetch_product(page, url)
+                        slots[idx] = (
+                            url,
+                            listing,
+                            None if listing else "No title/price on that page",
+                        )
+                    except Exception as exc:
+                        logger.warning("Fetch failed %s: %s", url, exc)
+                        if competitor == "amazon":
+                            fallback = await AmazonScraper().fetch_product_http(url)
+                            if not fallback:
+                                fallback = listing_from_url_only(url)
+                            if fallback:
+                                slots[idx] = (url, fallback, None)
+                                continue
+                        slots[idx] = (url, None, str(exc))
+                    if i < len(pending) - 1:
+                        await asyncio.sleep(settings.SCRAPER_REQUEST_DELAY_SECONDS)
+            finally:
+                await context.close()
+                await browser.close()
+
+    return [slot for slot in slots if slot is not None]
 
 
 async def compare_storefront_and_competitor(
