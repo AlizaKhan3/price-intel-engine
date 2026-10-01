@@ -5,6 +5,13 @@ from fastapi.responses import HTMLResponse
 
 from app.config import get_settings
 from app.services import automation, discovery
+from app.services.markets import (
+    detect_market_from_url,
+    format_money,
+    get_market,
+    list_markets,
+    resolve_market,
+)
 from app.services.scrape import compare_storefront_and_competitor
 from app.services.tenants import find_tenant_by_slug, tenant_id as tid
 from app.services.urls import competitor_label
@@ -13,13 +20,25 @@ from app.services import usage as usage_log
 router = APIRouter(tags=["ui"])
 
 
+def _money(amount, market=None, currency: str | None = None) -> str:
+    return format_money(amount, market, currency=currency)
+
+
 def _page(
     result: dict | None = None,
     error: str | None = None,
     ours: str = "",
     theirs: str = "",
     actor: str = "",
+    market_code: str = "",
+    market_source: str = "",
 ) -> str:
+    market = get_market(market_code) or (
+        get_market((result or {}).get("market", {}).get("code")) if result else None
+    )
+    if not market and ours:
+        market = detect_market_from_url(ours)
+    currency = (result or {}).get("currency") or (market.currency if market else None)
     banner = ""
     cards = ""
     if error:
@@ -36,10 +55,18 @@ def _page(
             f"</div>"
         )
         ours_p = result.get("our_product") or {}
+        orig_note = ""
+        if ours_p.get("original_currency") and ours_p.get("original_price") is not None:
+            orig_note = (
+                f'<p class="muted">Original: '
+                f'{_money(ours_p.get("original_price"), currency=ours_p.get("original_currency"))}'
+                f' → {_money(ours_p.get("price"), market, currency)}</p>'
+            )
         cards = f"""
         <article class="solo">
           <h3>Your listing</h3>
-          <p class="price">Rs. {_fmt(ours_p.get("price"))}</p>
+          <p class="price">{_money(ours_p.get("price"), market, currency)}</p>
+          {orig_note}
           <p class="muted">{_esc(ours_p.get("marketplace") or "Your store")}</p>
           <p>{_esc(ours_p.get("title") or "")}</p>
         </article>
@@ -49,7 +76,7 @@ def _page(
         rows += (
             "<tr class='you'>"
             f"<td>{_esc(ours_p.get('marketplace') or 'Your store')}</td>"
-            f"<td>Rs. {_fmt(ours_p.get('price'))}</td>"
+            f"<td>{_money(ours_p.get('price'), market, currency)}</td>"
             "<td>Your listing</td>"
             f"<td><a href='{_esc(ours_url)}' target='_blank' rel='noreferrer'>Open</a></td>"
             "</tr>"
@@ -62,7 +89,7 @@ def _page(
             f"{_esc(competitor_label(listing.get('competitor') or ''))}"
             f"<div class='muted'>{_esc((listing.get('title') or '')[:90])}</div>"
             "</td>"
-            f"<td>Rs. {_fmt(listing.get('price'))}</td>"
+            f"<td>{_money(listing.get('price'), market, listing.get('currency') or currency)}</td>"
                 f"<td>{_esc(row.get('headline'))}</td>"
                 f"<td><a href='{_esc(listing.get('url'))}' target='_blank' rel='noreferrer'>Open</a></td>"
                 "</tr>"
@@ -71,7 +98,7 @@ def _page(
             "<table><thead><tr><th>Shop</th><th>Price</th><th>vs you</th><th></th></tr></thead>"
             f"<tbody>{rows}</tbody></table>"
         )
-        cards += _leaderboard_html(ours_p, result.get("matches") or [])
+        cards += _leaderboard_html(ours_p, result.get("matches") or [], market=market, currency=currency)
         skipped = result.get("skipped") or []
         looked = result.get("searched_urls") or []
         if looked:
@@ -97,21 +124,23 @@ def _page(
         <div class="grid">
           <article>
             <h3>Your listing</h3>
-            <p class="price">Rs. {_fmt(ours_p.get("price"))}</p>
+            <p class="price">{_money(ours_p.get("price"), market, currency)}</p>
             <p class="muted">{_esc(ours_p.get("marketplace") or "Your store")}</p>
             <p>{_esc(ours_p.get("title") or "")}</p>
           </article>
           <article>
             <h3>{_esc((theirs_p.get("competitor") or "competitor").title())}</h3>
-            <p class="price">Rs. {_fmt(theirs_p.get("price"))}</p>
+            <p class="price">{_money(theirs_p.get("price"), market, theirs_p.get("currency") or currency)}</p>
             <p class="muted">Competitor</p>
             <p>{_esc(theirs_p.get("title") or "")}</p>
           </article>
         </div>
         """
-        if result.get("difference_rs"):
+        if result.get("difference") or result.get("difference_rs"):
             cards += (
-                f'<p class="diff">Difference: <strong>Rs. {_fmt(result.get("difference_rs"))}</strong></p>'
+                f'<p class="diff">Difference: <strong>'
+                f'{_money(result.get("difference") or result.get("difference_rs"), market, currency)}'
+                f"</strong></p>"
             )
         if theirs_p.get("price"):
             cards += _leaderboard_html(
@@ -122,6 +151,8 @@ def _page(
                         "headline": result.get("headline"),
                     }
                 ],
+                market=market,
+                currency=currency,
             )
     return f"""<!doctype html>
 <html lang="en">
@@ -148,10 +179,16 @@ def _page(
       padding: 22px; display: grid; gap: 14px;
     }}
     label {{ font-size: 0.85rem; color: var(--muted); }}
-    input {{
+    input, select {{
       width: 100%; margin-top: 6px; padding: 12px 14px; border-radius: 10px;
       border: 1px solid #334155; background: #0f1720; color: var(--ink); font-size: 0.95rem;
     }}
+    .market-note {{
+      margin: 0 0 14px; padding: 12px 14px; border-radius: 12px;
+      background: #121a24; border: 1px solid #2c3947; color: var(--muted); font-size: 0.92rem;
+    }}
+    .market-note strong {{ color: var(--ink); }}
+    .market-note.warn {{ border-color: #6b5a1a; color: var(--accent); }}
     button {{
       margin-top: 6px; padding: 12px 16px; border: 0; border-radius: 10px;
       background: var(--accent); color: #1a1403; font-weight: 700; cursor: pointer;
@@ -294,8 +331,9 @@ def _page(
   <main>
     <nav><a href="/compare">Compare one</a><a href="/automate">Automate catalog</a></nav>
     <h1>Compare a product price</h1>
-    <p class="lede">Paste any product page link (your shop or another site). Leave the competitor box empty —
-    we read the title and price, search the web, and compare matching shops — one listing per shop, cheapest first.</p>
+    <p class="lede">Paste any product page link (Daraz, Amazon, Shein, Sadiq, or any shop). Leave the competitor box empty —
+    we read the title and price, search the web in your country/market, and compare matching shops.</p>
+    {_market_banner(market, market_source, currency)}
     <form method="post" action="/compare" onsubmit="return startCompare(this);">
       <div>
         <label>Your name (optional — for internal usage log)
@@ -304,7 +342,16 @@ def _page(
       </div>
       <div>
         <label>Product link
-          <input name="storefront_url" required placeholder="https://any-shop.com/products/..." value="{_esc(ours)}"/>
+          <input name="storefront_url" required placeholder="https://any-shop.com/products/..." value="{_esc(ours)}"
+            oninput="hintMarket(this.value)"/>
+        </label>
+      </div>
+      <div>
+        <label id="market-label">{_market_label(market, market_source)}
+          <select name="market_code" id="market_code">
+            <option value="">— Select country / marketplace —</option>
+            {_market_options(market_code or (market.code if market else ""))}
+          </select>
         </label>
       </div>
       <div>
@@ -328,8 +375,26 @@ def _page(
     · <a class="docs" href="/docs">API docs</a></p>
   </main>
   <script>
+    var MARKET_HINTS = {_market_hints_json()};
+    function hintMarket(url) {{
+      try {{
+        var host = (new URL(url)).hostname.replace(/^www\\./, "").toLowerCase();
+      }} catch (e) {{ return; }}
+      var sel = document.getElementById("market_code");
+      var label = document.getElementById("market-label");
+      if (!sel || sel.value) return;
+      for (var i = 0; i < MARKET_HINTS.length; i++) {{
+        var row = MARKET_HINTS[i];
+        if (host === row.host || host.endsWith("." + row.host) || host.endsWith(row.host)) {{
+          sel.value = row.code;
+          if (label) label.childNodes[0].textContent = "Country detected: " + row.label + " (change anytime) ";
+          return;
+        }}
+      }}
+    }}
     function startCompare(form) {{
       var btn = form.querySelector("button");
+      hintMarket((form.storefront_url && form.storefront_url.value) || "");
       btn.disabled = true;
       btn.textContent = "Comparing…";
       var results = document.getElementById("results");
@@ -338,9 +403,7 @@ def _page(
       if (loading) loading.classList.remove("hidden");
       var steps = [
         "Searching the web for the same product…",
-        "Checking Daraz…",
-        "Checking Smart Accessories…",
-        "Checking Apricot and ShoppersPk…",
+        "Checking shops in your market…",
         "Reading prices and matching titles…",
         "Building your comparison…"
       ];
@@ -355,6 +418,67 @@ def _page(
   </script>
 </body>
 </html>"""
+
+
+def _market_label(market, market_source: str) -> str:
+    if market and market_source == "detected":
+        return f"Country detected: {market.label} — change anytime"
+    if market and market_source == "manual":
+        return f"Country / marketplace ({market.currency})"
+    return "Select your country / marketplace"
+
+
+def _market_banner(market, market_source: str, currency: str | None) -> str:
+    if market and market_source == "detected":
+        return (
+            f'<div class="market-note"><strong>Country detected: { _esc(market.label) }</strong>'
+            f" · Currency: {_esc(currency or market.currency)}. "
+            "You can change it in the dropdown below.</div>"
+        )
+    if market and market_source == "manual":
+        return (
+            f'<div class="market-note"><strong>Searching in { _esc(market.label) }</strong>'
+            f" · Prices in {_esc(currency or market.currency)}.</div>"
+        )
+    return (
+        '<div class="market-note warn"><strong>Select your country/marketplace</strong> '
+        "— we could not detect it from the URL. Pakistan is not assumed.</div>"
+    )
+
+
+def _market_options(selected: str) -> str:
+    options = []
+    for m in list_markets():
+        sel = " selected" if m.code == (selected or "").lower() else ""
+        options.append(
+            f'<option value="{m.code}"{sel}>{_esc(m.flag)} {_esc(m.country)} ({m.currency})</option>'
+        )
+    return "\n".join(options)
+
+
+def _market_hints_json() -> str:
+    import json
+
+    rows = []
+    for m in list_markets():
+        if m.amazon_host:
+            rows.append({"host": m.amazon_host.replace("www.", ""), "code": m.code, "label": m.label})
+        for site in m.discovery_sites[:4]:
+            rows.append({"host": site, "code": m.code, "label": m.label})
+    # Prefer longer hosts first in JS via order; include common marketplaces.
+    rows.extend(
+        [
+            {"host": "sadiq.ai", "code": "pk", "label": MARKETS_LABEL_PK},
+            {"host": "daraz.pk", "code": "pk", "label": MARKETS_LABEL_PK},
+            {"host": "shein.com", "code": "us", "label": "United States 🇺🇸"},
+            {"host": "noon.com", "code": "ae", "label": "United Arab Emirates 🇦🇪"},
+            {"host": "flipkart.com", "code": "in", "label": "India 🇮🇳"},
+        ]
+    )
+    return json.dumps(rows)
+
+
+MARKETS_LABEL_PK = "Pakistan 🇵🇰"
 
 
 def _esc(value) -> str:
@@ -382,7 +506,13 @@ def _ordinal(n: int) -> str:
     return f"{n}{suffix}"
 
 
-def _leaderboard_html(ours_p: dict, matches: list[dict]) -> str:
+def _leaderboard_html(
+    ours_p: dict,
+    matches: list[dict],
+    *,
+    market=None,
+    currency: str | None = None,
+) -> str:
     """Podium + ranked list: cheapest shop is 1st (your pasted link included)."""
     entries = []
     our_price = ours_p.get("price")
@@ -424,18 +554,18 @@ def _leaderboard_html(ours_p: dict, matches: list[dict]) -> str:
     entries.sort(key=lambda item: (item["price"], 0 if item["you"] else 1))
     top = entries[:5]
     cheapest = top[0]["price"]
+    tie = 0.01 if (currency or "") not in {"PKR", "JPY", "KRW"} else 1
 
     podium_slots = []
-    # Visual order on desktop: 2nd | 1st | 3rd
     for rank, css in ((2, "second"), (1, "first"), (3, "third")):
         if rank > len(top):
             continue
         item = top[rank - 1]
         you = " you" if item["you"] else ""
         gap = item["price"] - cheapest
-        hint = "Cheapest" if gap < 1 else f"+ Rs. {_fmt(gap)} vs 1st"
+        hint = "Cheapest" if gap < tie else f"+ {_money(gap, market, currency)} vs 1st"
         if item["you"]:
-            hint = "You're #1 — cheapest" if gap < 1 else f"{hint} · you"
+            hint = "You're #1 — cheapest" if gap < tie else f"{hint} · you"
         open_link = (
             f" · <a href='{_esc(item['url'])}' target='_blank' rel='noreferrer'>Open</a>"
             if item["url"]
@@ -445,7 +575,7 @@ def _leaderboard_html(ours_p: dict, matches: list[dict]) -> str:
             f"<div class='stage {css}{you}'>"
             f"<span class='place'>{_ordinal(rank)}</span>"
             f"<p class='shop'>{_esc(item['name'])}</p>"
-            f"<p class='amt'>Rs. {_fmt(item['price'])}</p>"
+            f"<p class='amt'>{_money(item['price'], market, currency)}</p>"
             f"<p class='hint'>{_esc(item['seller'])}</p>"
             f"<p class='hint'>{_esc(hint)}{open_link}</p>"
             f"<div class='bar' aria-hidden='true'></div>"
@@ -457,20 +587,20 @@ def _leaderboard_html(ours_p: dict, matches: list[dict]) -> str:
         you = " you" if item["you"] else ""
         gap = item["price"] - cheapest
         meta = "Your listing" if item["you"] else (item["seller"] or "Competitor")
-        if gap >= 1:
-            meta = f"{meta} · + Rs. {_fmt(gap)} vs 1st"
+        if gap >= tie:
+            meta = f"{meta} · + {_money(gap, market, currency)} vs 1st"
         rest += (
             f"<div class='rank{you}' style='animation-delay:{0.05 * idx}s'>"
             f"<div class='badge'>{_ordinal(idx)}</div>"
             f"<div><p class='name'>{_esc(item['name'])}</p>"
             f"<p class='meta'>{_esc(meta)}</p></div>"
-            f"<div class='amt'>Rs. {_fmt(item['price'])}</div>"
+            f"<div class='amt'>{_money(item['price'], market, currency)}</div>"
             f"</div>"
         )
 
     winner = top[0]["name"]
     sub = (
-        f"{_esc(winner)} is 1st at Rs. {_fmt(cheapest)}. "
+        f"{_esc(winner)} is 1st at {_money(cheapest, market, currency)}. "
         "Ranked by lowest price (same product matches only)."
     )
     return (
@@ -481,6 +611,7 @@ def _leaderboard_html(ours_p: dict, matches: list[dict]) -> str:
         + (f"<div class='ranks'>{rest}</div>" if rest else "")
         + "</section>"
     )
+
 
 
 @router.get("/compare", response_class=HTMLResponse)
@@ -494,15 +625,36 @@ async def compare_submit(
     storefront_url: str = Form(...),
     competitor_url: str = Form(default=""),
     actor: str = Form(default=""),
+    market_code: str = Form(default=""),
 ):
     tenant = await find_tenant_by_slug("sadiq")
     ours = storefront_url.strip()
     theirs = (competitor_url or "").strip()
     who = (actor or "").strip()
+    selected = (market_code or "").strip()
+    market, market_source = resolve_market(ours, selected or None)
+    page_kwargs = {
+        "ours": ours,
+        "theirs": theirs,
+        "actor": who,
+        "market_code": market.code if market else selected,
+        "market_source": market_source,
+    }
     if not tenant:
         return HTMLResponse(
-            _page(error="No tenant is configured.", ours=ours, theirs=theirs, actor=who),
+            _page(error="No tenant is configured.", **page_kwargs),
             status_code=500,
+        )
+    if not market:
+        return HTMLResponse(
+            _page(
+                error=(
+                    "Select your country/marketplace so we know which currency and shops "
+                    "to compare. We could not detect it from that URL."
+                ),
+                **page_kwargs,
+            ),
+            status_code=400,
         )
     try:
         if theirs:
@@ -512,9 +664,26 @@ async def compare_submit(
                 competitor_url=theirs,
                 auto_approve=True,
             )
+            # Stamp market onto two-link compare payloads for display.
+            if isinstance(result, dict):
+                result.setdefault(
+                    "market",
+                    {
+                        "code": market.code,
+                        "country": market.country,
+                        "flag": market.flag,
+                        "currency": market.currency,
+                        "label": market.label,
+                    },
+                )
+                result.setdefault("currency", market.currency)
+                if result.get("our_product") is not None:
+                    result["our_product"].setdefault("currency", market.currency)
             action = "compare_links"
         else:
-            result = await discovery.discover_from_storefront(tenant, ours)
+            result = await discovery.discover_from_storefront(
+                tenant, ours, market=market
+            )
             action = "discover"
         summary = usage_log.summarize_result(result if isinstance(result, dict) else None)
         await usage_log.log_usage(
@@ -528,7 +697,7 @@ async def compare_submit(
             success=True,
             **summary,
         )
-        return HTMLResponse(_page(result=result, ours=ours, theirs=theirs, actor=who))
+        return HTMLResponse(_page(result=result, **page_kwargs))
     except Exception as exc:
         await usage_log.log_usage(
             action="discover" if not theirs else "compare_links",
@@ -542,7 +711,7 @@ async def compare_submit(
             error=str(exc),
         )
         return HTMLResponse(
-            _page(error=str(exc), ours=ours, theirs=theirs, actor=who),
+            _page(error=str(exc), **page_kwargs),
             status_code=400,
         )
 

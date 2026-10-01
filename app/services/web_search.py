@@ -23,17 +23,23 @@ SEARCH_UA = (
 )
 
 
-def search_web(query: str, max_results: int = 8) -> list[dict]:
+def search_web(query: str, max_results: int = 8, market=None) -> list[dict]:
     settings = get_settings()
+    gl = getattr(market, "search_gl", None) or "pk"
+    country = getattr(market, "search_country", None) or "PK"
+    region = getattr(market, "search_region", None) or "pk-en"
     items: list[dict] = []
     if settings.SERPER_API_KEY:
         try:
-            items = _serper(query, max_results, settings.SERPER_API_KEY)
+            items = _serper(query, max_results, settings.SERPER_API_KEY, gl=gl)
         except Exception as exc:
             logger.warning("Serper search failed (%s); falling back", exc)
     if len(items) < max_results and getattr(settings, "BRAVE_SEARCH_API_KEY", ""):
         try:
-            items = _merge(items, _brave(query, max_results, settings.BRAVE_SEARCH_API_KEY))
+            items = _merge(
+                items,
+                _brave(query, max_results, settings.BRAVE_SEARCH_API_KEY, country=country),
+            )
         except Exception as exc:
             logger.warning("Brave search failed (%s); falling back", exc)
     if len(items) < max_results and settings.GOOGLE_CSE_ID and settings.GOOGLE_CSE_KEY:
@@ -43,16 +49,14 @@ def search_web(query: str, max_results: int = 8) -> list[dict]:
             logger.warning("Google CSE search failed (%s); falling back", exc)
     if len(items) < 2:
         try:
-            items = _merge(items, _ddgs(query, max_results))
+            items = _merge(items, _ddgs(query, max_results, region=region))
         except Exception as exc:
             logger.warning("DuckDuckGo package search failed (%s); using HTML fallback", exc)
-    # Railway/datacenter IPs often get empty Yahoo/DDG package results — keep
-    # trying HTML backends until we have enough links.
     for name, fetcher in (
         ("duckduckgo_lite", _ddg_lite),
         ("duckduckgo_html", _duckduckgo_html),
-        ("bing_html", _bing_html),
-        ("google_html", _google_html),
+        ("bing_html", lambda q, n: _bing_html(q, n, cc=country)),
+        ("google_html", lambda q, n: _google_html(q, n, gl=gl)),
     ):
         if len(items) >= max_results:
             break
@@ -104,11 +108,11 @@ def search_provider() -> str:
     return "duckduckgo"
 
 
-def _serper(query: str, max_results: int, api_key: str) -> list[dict]:
+def _serper(query: str, max_results: int, api_key: str, gl: str = "pk") -> list[dict]:
     response = httpx.post(
         "https://google.serper.dev/search",
         headers={"X-API-KEY": api_key, "Content-Type": "application/json"},
-        json={"q": query, "num": max_results, "gl": "pk"},
+        json={"q": query, "num": max_results, "gl": gl},
         timeout=20,
     )
     response.raise_for_status()
@@ -120,10 +124,10 @@ def _serper(query: str, max_results: int, api_key: str) -> list[dict]:
     return items
 
 
-def _brave(query: str, max_results: int, api_key: str) -> list[dict]:
+def _brave(query: str, max_results: int, api_key: str, country: str = "PK") -> list[dict]:
     response = httpx.get(
         "https://api.search.brave.com/res/v1/web/search",
-        params={"q": query, "count": max_results, "country": "PK", "search_lang": "en"},
+        params={"q": query, "count": max_results, "country": country, "search_lang": "en"},
         headers={"Accept": "application/json", "X-Subscription-Token": api_key},
         timeout=20,
     )
@@ -151,16 +155,14 @@ def _google_cse(query: str, max_results: int, cx: str, key: str) -> list[dict]:
     return items
 
 
-def _ddgs(query: str, max_results: int) -> list[dict]:
+def _ddgs(query: str, max_results: int, region: str = "pk-en") -> list[dict]:
     from ddgs import DDGS
 
     items = []
-    # Yahoo respects site: and Pakistan queries. The DuckDuckGo engine crashes on
-    # Python 3.9 TLS 1.3 and the HTML fallback often ignores site: filters.
     with DDGS(verify=False) as client:
         for row in client.text(
             query,
-            region="pk-en",
+            region=region,
             max_results=max_results,
             backend="yahoo",
         ) or []:
@@ -236,11 +238,11 @@ def _ddg_lite(query: str, max_results: int) -> list[dict]:
     return items
 
 
-def _bing_html(query: str, max_results: int) -> list[dict]:
+def _bing_html(query: str, max_results: int, cc: str = "PK") -> list[dict]:
     try:
         response = httpx.get(
             "https://www.bing.com/search",
-            params={"q": query, "cc": "PK", "setlang": "en"},
+            params={"q": query, "cc": cc, "setlang": "en"},
             headers={"User-Agent": SEARCH_UA},
             timeout=20,
             follow_redirects=True,
@@ -263,11 +265,11 @@ def _bing_html(query: str, max_results: int) -> list[dict]:
     return items
 
 
-def _google_html(query: str, max_results: int) -> list[dict]:
+def _google_html(query: str, max_results: int, gl: str = "pk") -> list[dict]:
     """Best-effort Google HTML parse — often the only backend that still works on Railway."""
     response = httpx.get(
         "https://www.google.com/search",
-        params={"q": query, "hl": "en", "gl": "pk", "num": max_results},
+        params={"q": query, "hl": "en", "gl": gl, "num": max_results},
         headers={
             "User-Agent": SEARCH_UA,
             "Accept-Language": "en-US,en;q=0.9",
