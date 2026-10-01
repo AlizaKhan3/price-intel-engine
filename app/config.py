@@ -73,6 +73,12 @@ class Settings(BaseSettings):
 
     # --- Scraping defaults ---
     SCRAPER_REQUEST_DELAY_SECONDS: float = 2.0
+    # Wall-clock cap for one compare/discover request (search + page fetches).
+    COMPARE_BUDGET_SECONDS: float = 40
+    # Cap for the web-search phase, and for a single search_web() call.
+    DISCOVERY_SEARCH_BUDGET_SECONDS: float = 7
+    DISCOVERY_CANDIDATE_BUDGET_SECONDS: float = 16
+    SEARCH_HTTP_TIMEOUT_SECONDS: float = 6
     SCRAPER_USER_AGENT: str = (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"

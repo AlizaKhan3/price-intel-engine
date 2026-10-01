@@ -1,4 +1,10 @@
 # Railway: deploy from GitHub, set env vars in the dashboard.
+# Memory: set this service to at least 1 GB in the Railway dashboard. Chromium
+# is only a fallback (Daraz, sadiq.ai, and Shopify pages are read over HTTP),
+# but a JS-only page can still spike RAM. 512 MB is what was crashing with
+# "Page crashed" / an upstream error.
+# Search: set SERPER_API_KEY or BRAVE_SEARCH_API_KEY. Without one of those,
+# discovery falls back to DuckDuckGo/Bing HTML, which datacenter IPs often block.
 # Redis: add a Redis plugin and map REDIS_URL.
 # Optional worker service: same image, startCommand =
 #   celery -A app.tasks.celery_app worker --loglevel=info

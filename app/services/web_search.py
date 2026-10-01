@@ -4,10 +4,14 @@ from __future__ import annotations
 Find candidate product-page URLs via a web search API — not by scraping
 marketplace catalog/search pages (Daraz robots.txt disallows /catalog/).
 
-Priority: Serper → Google Programmable Search → DuckDuckGo.
+Priority: Serper → Brave → Google Programmable Search.
+HTML fallbacks run only when every API returns nothing, and only two of
+them, each with a short timeout. Chaining every engine was blowing the
+compare time budget on Railway.
 """
 import logging
 import re
+import time
 from html import unescape
 from urllib.parse import parse_qs, unquote, urlparse
 
@@ -23,47 +27,54 @@ SEARCH_UA = (
 )
 
 
+# Tried only when Serper, Brave, and Google CSE all return nothing.
+HTML_FALLBACKS = ("duckduckgo_lite", "bing_html")
+
+
 def search_web(query: str, max_results: int = 8, market=None) -> list[dict]:
     settings = get_settings()
     gl = getattr(market, "search_gl", None) or "pk"
     country = getattr(market, "search_country", None) or "PK"
-    region = getattr(market, "search_region", None) or "pk-en"
+    timeout = float(settings.SEARCH_HTTP_TIMEOUT_SECONDS or 6)
+    deadline = time.monotonic() + float(settings.DISCOVERY_SEARCH_BUDGET_SECONDS or 7)
     items: list[dict] = []
+
+    def remaining() -> float:
+        return deadline - time.monotonic()
+
+    def take(label: str, rows_fn) -> None:
+        nonlocal items
+        if remaining() < 0.5 or len(items) >= max_results:
+            return
+        try:
+            rows = rows_fn(max(1.0, min(timeout, remaining())))
+            items = _merge(items, rows)
+        except Exception as exc:
+            logger.warning("%s search failed (%s)", label, exc)
+
     if settings.SERPER_API_KEY:
-        try:
-            items = _serper(query, max_results, settings.SERPER_API_KEY, gl=gl)
-        except Exception as exc:
-            logger.warning("Serper search failed (%s); falling back", exc)
-    if len(items) < max_results and getattr(settings, "BRAVE_SEARCH_API_KEY", ""):
-        try:
-            items = _merge(
-                items,
-                _brave(query, max_results, settings.BRAVE_SEARCH_API_KEY, country=country),
-            )
-        except Exception as exc:
-            logger.warning("Brave search failed (%s); falling back", exc)
-    if len(items) < max_results and settings.GOOGLE_CSE_ID and settings.GOOGLE_CSE_KEY:
-        try:
-            items = _merge(items, _google_cse(query, max_results, settings.GOOGLE_CSE_ID, settings.GOOGLE_CSE_KEY))
-        except Exception as exc:
-            logger.warning("Google CSE search failed (%s); falling back", exc)
-    if len(items) < 2:
-        try:
-            items = _merge(items, _ddgs(query, max_results, region=region))
-        except Exception as exc:
-            logger.warning("DuckDuckGo package search failed (%s); using HTML fallback", exc)
-    for name, fetcher in (
-        ("duckduckgo_lite", _ddg_lite),
-        ("duckduckgo_html", _duckduckgo_html),
-        ("bing_html", lambda q, n: _bing_html(q, n, cc=country)),
-        ("google_html", lambda q, n: _google_html(q, n, gl=gl)),
-    ):
-        if len(items) >= max_results:
+        take("serper", lambda t: _serper(query, max_results, settings.SERPER_API_KEY, gl=gl, timeout=t))
+    if settings.BRAVE_SEARCH_API_KEY:
+        take(
+            "brave",
+            lambda t: _brave(query, max_results, settings.BRAVE_SEARCH_API_KEY, country=country, timeout=t),
+        )
+    if settings.GOOGLE_CSE_ID and settings.GOOGLE_CSE_KEY:
+        take(
+            "google_cse",
+            lambda t: _google_cse(query, max_results, settings.GOOGLE_CSE_ID, settings.GOOGLE_CSE_KEY, timeout=t),
+        )
+    if items:
+        return items[:max_results]
+
+    fallbacks = {
+        "duckduckgo_lite": lambda t: _ddg_lite(query, max_results, timeout=t),
+        "bing_html": lambda t: _bing_html(query, max_results, cc=country, timeout=t),
+    }
+    for name in HTML_FALLBACKS:
+        if len(items) >= 2 or remaining() < 0.5:
             break
-        try:
-            items = _merge(items, fetcher(query, max_results))
-        except Exception as exc:
-            logger.warning("%s search failed (%s)", name, exc)
+        take(name, fallbacks[name])
     return items[:max_results]
 
 
@@ -74,7 +85,7 @@ def shopify_products(host: str, query: str, limit: int = 3) -> list[dict]:
             f"https://{host}/search/suggest.json",
             params={"q": query, "resources[type]": "product", "resources[limit]": limit},
             headers={"User-Agent": SEARCH_UA},
-            timeout=12,
+            timeout=4,
             follow_redirects=True,
         )
         if response.status_code != 200:
@@ -108,12 +119,12 @@ def search_provider() -> str:
     return "duckduckgo"
 
 
-def _serper(query: str, max_results: int, api_key: str, gl: str = "pk") -> list[dict]:
+def _serper(query: str, max_results: int, api_key: str, gl: str = "pk", timeout: float = 6) -> list[dict]:
     response = httpx.post(
         "https://google.serper.dev/search",
         headers={"X-API-KEY": api_key, "Content-Type": "application/json"},
         json={"q": query, "num": max_results, "gl": gl},
-        timeout=20,
+        timeout=timeout,
     )
     response.raise_for_status()
     items = []
@@ -124,12 +135,12 @@ def _serper(query: str, max_results: int, api_key: str, gl: str = "pk") -> list[
     return items
 
 
-def _brave(query: str, max_results: int, api_key: str, country: str = "PK") -> list[dict]:
+def _brave(query: str, max_results: int, api_key: str, country: str = "PK", timeout: float = 6) -> list[dict]:
     response = httpx.get(
         "https://api.search.brave.com/res/v1/web/search",
         params={"q": query, "count": max_results, "country": country, "search_lang": "en"},
         headers={"Accept": "application/json", "X-Subscription-Token": api_key},
-        timeout=20,
+        timeout=timeout,
     )
     response.raise_for_status()
     items = []
@@ -140,11 +151,11 @@ def _brave(query: str, max_results: int, api_key: str, country: str = "PK") -> l
     return items
 
 
-def _google_cse(query: str, max_results: int, cx: str, key: str) -> list[dict]:
+def _google_cse(query: str, max_results: int, cx: str, key: str, timeout: float = 6) -> list[dict]:
     response = httpx.get(
         "https://www.googleapis.com/customsearch/v1",
         params={"q": query, "cx": cx, "key": key, "num": min(max_results, 10)},
-        timeout=20,
+        timeout=timeout,
     )
     response.raise_for_status()
     items = []
@@ -196,13 +207,13 @@ def _duckduckgo_html(query: str, max_results: int) -> list[dict]:
     return items
 
 
-def _ddg_lite(query: str, max_results: int) -> list[dict]:
+def _ddg_lite(query: str, max_results: int, timeout: float = 6) -> list[dict]:
     """DuckDuckGo Lite — more reliable from datacenter IPs than html.duckduckgo.com."""
     response = httpx.post(
         "https://lite.duckduckgo.com/lite/",
         data={"q": query},
         headers={"User-Agent": SEARCH_UA},
-        timeout=20,
+        timeout=timeout,
         follow_redirects=True,
     )
     response.raise_for_status()
@@ -238,13 +249,13 @@ def _ddg_lite(query: str, max_results: int) -> list[dict]:
     return items
 
 
-def _bing_html(query: str, max_results: int, cc: str = "PK") -> list[dict]:
+def _bing_html(query: str, max_results: int, cc: str = "PK", timeout: float = 6) -> list[dict]:
     try:
         response = httpx.get(
             "https://www.bing.com/search",
             params={"q": query, "cc": cc, "setlang": "en"},
             headers={"User-Agent": SEARCH_UA},
-            timeout=20,
+            timeout=timeout,
             follow_redirects=True,
         )
         response.raise_for_status()

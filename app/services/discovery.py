@@ -10,6 +10,7 @@ is scraped first. Search never uses marketplace catalog pages (e.g. Daraz
 import asyncio
 import logging
 import re
+import time
 from urllib.parse import urlparse, urlunparse
 
 from app.config import get_settings
@@ -136,6 +137,8 @@ async def discover_from_storefront(
             )
         except ValueError:
             pass
+        except Exception as exc:
+            logger.warning("Catalog lookup failed for %s (%s); scraping the page", url, exc)
     return await discover_from_external_url(tenant, url, market=resolved)
 
 
@@ -196,8 +199,17 @@ async def _discover_with_product(
     title = (product.get("title") or "").strip()
     if not title:
         raise ValueError("That product has no title to search with.")
+    from app.scrapers.parse import is_generic_site_title
+
+    if is_generic_site_title(title):
+        raise ValueError(
+            "We couldn't read a product name from that page. "
+            "We didn't guess a price or search for the site name. "
+            "Paste a product link that includes the product name."
+        )
 
     market = market or get_market(product.get("market_code"))
+    started = time.monotonic()
     candidates = await _search_candidates(
         title,
         max_urls=max_urls,
@@ -219,17 +231,25 @@ async def _discover_with_product(
         )
         return _pack(product, comparisons, skipped, storefront_url, [], market=market)
 
+    remaining = settings.COMPARE_BUDGET_SECONDS - (time.monotonic() - started)
     fetched = await fetch_competitor_listings(
-        [(competitor_from_url(url), url) for url in candidates]
+        [(competitor_from_url(url), url) for url in candidates],
+        budget_seconds=max(8.0, remaining),
     )
     min_score = settings.DISCOVERY_MIN_SCORE
     our_price = product.get("price") or 0
+    our_price_unknown = bool(product.get("price_unknown")) or our_price <= 0
     our_host = exclude_host or _host(storefront_url or product.get("url") or "")
     market_currency = market.currency if market else (product.get("currency") or "USD")
 
     for url, listing, error in fetched:
-        if error or listing is None:
-            skipped.append({"url": url, "reason": error or "Could not read title/price"})
+        if listing is None or listing.price_unknown or not listing.price:
+            skipped.append(
+                {
+                    "url": url,
+                    "reason": error or "Could not read a real price on that page",
+                }
+            )
             continue
         if our_host and _host(url) == our_host:
             skipped.append({"url": url, "reason": "Same shop as your pasted link"})
@@ -265,7 +285,10 @@ async def _discover_with_product(
         # Keep title-matched shops even when price is far apart (flash-sale vs
         # full price, or outlier listings). Flag them instead of dropping.
         price_outlier = bool(
-            our_price and listing.price and not _discovery_price_ok(listing.price, our_price)
+            not our_price_unknown
+            and our_price
+            and listing.price
+            and not _discovery_price_ok(listing.price, our_price)
         )
         auto_approve = score >= (tenant.get("matching") or {}).get(
             "auto_approve_score", settings.MATCH_AUTO_APPROVE_SCORE
@@ -285,7 +308,14 @@ async def _discover_with_product(
         await asyncio.sleep(0)
 
     comparisons = _one_per_shop(comparisons)[: settings.DISCOVERY_MAX_URLS]
-    comparisons.sort(key=lambda row: (row.get("competitor_listing") or {}).get("price") or 9e9)
+    from app.scrapers.parse import comparison_rank
+
+    comparisons.sort(
+        key=lambda row: comparison_rank(
+            (row.get("competitor_listing") or {}).get("in_stock", True),
+            (row.get("competitor_listing") or {}).get("price"),
+        )
+    )
     return _pack(product, comparisons, skipped, storefront_url, candidates, market=market)
 
 
@@ -445,6 +475,7 @@ async def _search_candidates(
     cap = max_urls or settings.DISCOVERY_MAX_URLS
     per_host = max(1, settings.DISCOVERY_PER_HOST)
     queries = _search_queries(title, storefront_url)
+    deadline = time.monotonic() + float(settings.DISCOVERY_CANDIDATE_BUDGET_SECONDS)
     found: list[str] = []
     seen_url: set[str] = set()
     seen_host: dict[str, int] = {}
@@ -475,8 +506,8 @@ async def _search_candidates(
         found.append(clean)
 
     logger.info("Discovery queries=%s exclude_host=%s market=%s", queries, source_host or None, market.code if market else None)
-    for query in queries[:3]:
-        if len(found) >= cap:
+    for query in queries[:2]:
+        if len(found) >= cap or time.monotonic() >= deadline:
             break
         q_buy = f"{query} {locale} buy".strip() if locale else f"{query} buy"
         q_plain = f"{query} {locale}".strip() if locale else query
@@ -484,21 +515,31 @@ async def _search_candidates(
             add(row.get("url") or "", row.get("title") or "")
             if len(found) >= cap:
                 break
-        if len(found) >= cap:
+        if len(found) >= cap or time.monotonic() >= deadline:
             break
         for row in await asyncio.to_thread(search_web, q_plain, 12, market):
             add(row.get("url") or "", row.get("title") or "")
             if len(found) >= cap:
                 break
 
-    if len(found) < cap and queries:
-        site_rows = await asyncio.gather(
-            *[
-                asyncio.to_thread(search_web, f"{queries[0]} site:{site}", 6, market)
-                for site in sites
-            ]
-        )
+    if len(found) < cap and queries and time.monotonic() < deadline:
+        site_tasks = [
+            asyncio.wait_for(
+                asyncio.to_thread(search_web, f"{queries[0]} site:{site}", 6, market),
+                timeout=8,
+            )
+            for site in sites[:6]
+        ]
+        try:
+            site_rows = await asyncio.wait_for(
+                asyncio.gather(*site_tasks, return_exceptions=True),
+                timeout=9,
+            )
+        except asyncio.TimeoutError:
+            site_rows = []
         for rows in site_rows:
+            if isinstance(rows, Exception):
+                continue
             if len(found) >= cap:
                 break
             for row in rows:
@@ -506,41 +547,48 @@ async def _search_candidates(
                 if len(found) >= cap:
                     break
 
-    for site in sites[:12]:
-        if len(found) >= cap:
-            break
-        if source_host and site in source_host:
-            continue
-        if any(_host(item).endswith(site) for item in found):
-            continue
-        ranked = []
-        for row in shopify_products(site, queries[0], limit=5):
-            score, miss = _match_score(title, row.get("title") or "", storefront_url)
-            if miss:
+    if queries and time.monotonic() < deadline:
+        shop_rows = await _shopify_many(
+            [site for site in sites[:12] if not (source_host and site in source_host)],
+            queries[0],
+            limit=5,
+        )
+        for site, rows in shop_rows:
+            if len(found) >= cap:
+                break
+            if any(_host(item).endswith(site) for item in found):
                 continue
-            ranked.append((score, row))
-        ranked.sort(key=lambda pair: pair[0], reverse=True)
-        floor = settings.DISCOVERY_MIN_SCORE if found else max(50, settings.DISCOVERY_MIN_SCORE - 15)
-        if ranked and ranked[0][0] >= floor:
-            add(ranked[0][1].get("url") or "", ranked[0][1].get("title") or "")
-
-    if len(found) < 2 and queries:
-        for query in queries[:3]:
-            for site in sites[:12]:
-                if len(found) >= cap:
-                    break
-                if source_host and site in source_host:
+            ranked = []
+            for row in rows:
+                score, miss = _match_score(title, row.get("title") or "", storefront_url)
+                if miss:
                     continue
-                for row in shopify_products(site, query, limit=3):
-                    score, miss = _match_score(title, row.get("title") or "", storefront_url)
-                    if miss:
-                        continue
-                    if score >= max(50, settings.DISCOVERY_MIN_SCORE - 15):
-                        add(row.get("url") or "", row.get("title") or "")
-                        break
+                ranked.append((score, row))
+            ranked.sort(key=lambda pair: pair[0], reverse=True)
+            floor = settings.DISCOVERY_MIN_SCORE if found else max(50, settings.DISCOVERY_MIN_SCORE - 15)
+            if ranked and ranked[0][0] >= floor:
+                add(ranked[0][1].get("url") or "", ranked[0][1].get("title") or "")
 
     logger.info("Discovery search urls=%s", found)
     return found[:cap]
+
+
+async def _shopify_many(sites: list[str], query: str, limit: int = 5) -> list[tuple[str, list[dict]]]:
+    """Shopify suggest lookups run in threads so they don't block the event loop."""
+
+    async def one(site: str) -> tuple[str, list[dict]]:
+        try:
+            rows = await asyncio.wait_for(
+                asyncio.to_thread(shopify_products, site, query, limit),
+                timeout=4,
+            )
+        except Exception:
+            rows = []
+        return site, rows or []
+
+    if not sites:
+        return []
+    return list(await asyncio.gather(*(one(site) for site in sites)))
 
 
 def _slug_words(storefront_url: str | None) -> list[str]:
@@ -908,13 +956,20 @@ def _host(url: str) -> str:
 
 
 def _one_per_shop(comparisons: list[dict]) -> list[dict]:
+    from app.scrapers.parse import comparison_rank
+
     best: dict[str, dict] = {}
     for row in comparisons:
         listing = row.get("competitor_listing") or {}
         host = _host(listing.get("url") or "")
-        price = listing.get("price") or 9e9
         current = best.get(host)
-        if current is None or price < ((current.get("competitor_listing") or {}).get("price") or 9e9):
+        if current is None:
+            best[host] = row
+            continue
+        current_listing = current.get("competitor_listing") or {}
+        if comparison_rank(listing.get("in_stock", True), listing.get("price")) < comparison_rank(
+            current_listing.get("in_stock", True), current_listing.get("price")
+        ):
             best[host] = row
     return list(best.values())
 
@@ -1016,7 +1071,16 @@ def _pack(product, comparisons, skipped, storefront_url, searched, market: Marke
     currency = product.get("currency") or (market.currency if market else "USD")
     cheapest = comparisons[0] if comparisons else None
     shops = len(comparisons)
-    if cheapest:
+    price_unknown = bool(product.get("price_unknown")) or not (product.get("price") or 0)
+    if price_unknown and cheapest:
+        cheap_name = competitor_label((cheapest.get("competitor_listing") or {}).get("competitor") or "a shop")
+        cheap_price = (cheapest.get("competitor_listing") or {}).get("price")
+        headline = f"Found {shops} shop{'s' if shops != 1 else ''}. Your price couldn't be read."
+        detail = (
+            f"The site blocked or hid your price, so nothing was guessed. "
+            f"Lowest listed price is {cheap_name} at {format_money(cheap_price, market, currency=currency)}."
+        )
+    elif cheapest:
         cheap_name = competitor_label((cheapest.get("competitor_listing") or {}).get("competitor") or "a shop")
         cheap_price = (cheapest.get("competitor_listing") or {}).get("price")
         headline = cheapest.get("headline") or ""
@@ -1035,6 +1099,7 @@ def _pack(product, comparisons, skipped, storefront_url, searched, market: Marke
             "id": product["id"],
             "title": product.get("title"),
             "price": product.get("price"),
+            "price_unknown": bool(product.get("price_unknown")) or not (product.get("price") or 0),
             "currency": currency,
             "original_price": product.get("original_price"),
             "original_currency": product.get("original_currency"),
