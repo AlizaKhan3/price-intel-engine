@@ -27,6 +27,7 @@ from playwright.async_api import async_playwright
 
 from app.config import get_settings
 from app.models.product import CompetitorListing
+from app.scrapers.browser import block_heavy_resources, is_browser_crash, launch_chromium
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -40,32 +41,51 @@ class BaseScraper(ABC):
         """Given a Playwright page and a search query, return listings found."""
         raise NotImplementedError
 
+    async def _open_page(self, browser):
+        context = await browser.new_context(user_agent=settings.SCRAPER_USER_AGENT)
+        await context.route("**/*", block_heavy_resources)
+        page = await context.new_page()
+        return context, page
+
     async def run_search(self, query: str) -> list[CompetitorListing]:
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
-            page = await browser.new_page(user_agent=settings.SCRAPER_USER_AGENT)
+            browser = await launch_chromium(p)
+            context, page = await self._open_page(browser)
             try:
                 results = await self.search(page, query)
             finally:
+                await context.close()
                 await browser.close()
 
         await asyncio.sleep(settings.SCRAPER_REQUEST_DELAY_SECONDS)
         return results
 
     async def run_batch(self, queries: list[str]) -> dict[str, list[CompetitorListing]]:
-        """Run `search` for many queries sequentially, respecting the delay
-        between EVERY request (not just between batches)."""
+        """Run `search` for many queries. Each query gets its own page so one
+        crash does not take down the rest."""
         results = {}
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
-            page = await browser.new_page(user_agent=settings.SCRAPER_USER_AGENT)
+            browser = await launch_chromium(p)
             try:
                 for query in queries:
+                    context = None
                     try:
+                        if not browser.is_connected():
+                            browser = await launch_chromium(p)
+                        context, page = await self._open_page(browser)
                         results[query] = await self.search(page, query)
-                    except Exception:
+                    except Exception as exc:
                         logger.exception("Scrape failed for query=%r on %s", query, self.competitor_name)
                         results[query] = []
+                        if is_browser_crash(exc):
+                            try:
+                                await browser.close()
+                            except Exception:
+                                pass
+                            browser = await launch_chromium(p)
+                    finally:
+                        if context is not None:
+                            await context.close()
                     await asyncio.sleep(settings.SCRAPER_REQUEST_DELAY_SECONDS)
             finally:
                 await browser.close()

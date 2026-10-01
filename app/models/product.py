@@ -63,6 +63,8 @@ class CompetitorListing(BaseModel):
     category: str | None = None
     price: float
     currency: str = "PKR"
+    # True when the page was a bot wall or had no price. Never store a guessed price.
+    price_unknown: bool = False
     in_stock: bool = True
     image_url: str | None = None
     url: str

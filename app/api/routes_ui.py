@@ -12,6 +12,7 @@ from app.services.markets import (
     list_markets,
     resolve_market,
 )
+from app.scrapers.parse import friendly_error
 from app.services.scrape import compare_storefront_and_competitor
 from app.services.tenants import find_tenant_by_slug, tenant_id as tid
 from app.services.urls import competitor_label
@@ -22,6 +23,12 @@ router = APIRouter(tags=["ui"])
 
 def _money(amount, market=None, currency: str | None = None) -> str:
     return format_money(amount, market, currency=currency)
+
+
+def _price_label(product: dict | None, market=None, currency: str | None = None) -> str:
+    if not product or product.get("price_unknown") or not (product.get("price") or 0):
+        return "Price unavailable"
+    return _money(product.get("price"), market, product.get("currency") or currency)
 
 
 def _page(
@@ -65,7 +72,7 @@ def _page(
         cards = f"""
         <article class="solo">
           <h3>Your listing</h3>
-          <p class="price">{_money(ours_p.get("price"), market, currency)}</p>
+          <p class="price">{_price_label(ours_p, market, currency)}</p>
           {orig_note}
           <p class="muted">{_esc(ours_p.get("marketplace") or "Your store")}</p>
           <p>{_esc(ours_p.get("title") or "")}</p>
@@ -76,7 +83,7 @@ def _page(
         rows += (
             "<tr class='you'>"
             f"<td>{_esc(ours_p.get('marketplace') or 'Your store')}</td>"
-            f"<td>{_money(ours_p.get('price'), market, currency)}</td>"
+            f"<td>{_price_label(ours_p, market, currency)}</td>"
             "<td>Your listing</td>"
             f"<td><a href='{_esc(ours_url)}' target='_blank' rel='noreferrer'>Open</a></td>"
             "</tr>"
@@ -124,7 +131,7 @@ def _page(
         <div class="grid">
           <article>
             <h3>Your listing</h3>
-            <p class="price">{_money(ours_p.get("price"), market, currency)}</p>
+            <p class="price">{_price_label(ours_p, market, currency)}</p>
             <p class="muted">{_esc(ours_p.get("marketplace") or "Your store")}</p>
             <p>{_esc(ours_p.get("title") or "")}</p>
           </article>
@@ -774,10 +781,10 @@ async def compare_submit(
             tenant_id=tid(tenant),
             request=request,
             success=False,
-            error=str(exc),
+            error=friendly_error(exc),
         )
         return HTMLResponse(
-            _page(error=str(exc), **page_kwargs),
+            _page(error=friendly_error(exc), **page_kwargs),
             status_code=400,
         )
 

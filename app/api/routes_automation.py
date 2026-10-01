@@ -5,6 +5,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from app.api.deps import get_current_tenant
+from app.scrapers.parse import friendly_error
 from app.services import automation, discovery
 from app.services import usage as usage_log
 from app.services.tenants import tenant_id as tid
@@ -117,7 +118,8 @@ async def discover_one(
             **summary,
         )
         return result
-    except ValueError as exc:
+    except Exception as exc:
+        message = friendly_error(exc)
         await usage_log.log_usage(
             action="discover",
             storefront_url=body.storefront_url or "",
@@ -127,9 +129,9 @@ async def discover_one(
             tenant_id=tid(tenant),
             request=request,
             success=False,
-            error=str(exc),
+            error=message,
         )
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=message) from exc
 
 
 @router.post(

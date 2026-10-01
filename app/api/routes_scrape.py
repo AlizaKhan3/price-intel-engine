@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field, HttpUrl
 from app.api.deps import get_current_tenant
 from app.api.serialize import dump_docs
 from app.db import get_priceintel_db
+from app.scrapers.parse import friendly_error
 from app.services.scrape import compare_storefront_and_competitor, scrape_product_url
 from app.services.tenants import tenant_id as tid
 from app.services.urls import competitor_from_url
@@ -55,12 +56,12 @@ async def scrape_one(body: ScrapeOneBody, tenant: dict = Depends(get_current_ten
             competitor_url=str(body.competitor_url),
             auto_approve=body.auto_approve,
         )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except HTTPException:
+        raise
     except PermissionError as exc:
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
-    except RuntimeError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        raise HTTPException(status_code=403, detail=friendly_error(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=friendly_error(exc)) from exc
 
 
 @router.post(
@@ -76,10 +77,8 @@ async def compare_links(body: CompareLinksBody, tenant: dict = Depends(get_curre
             competitor_url=str(body.competitor_url),
             auto_approve=True,
         )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except RuntimeError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=friendly_error(exc)) from exc
 
 
 @router.get("/listings", summary="Competitor listings already scraped")
