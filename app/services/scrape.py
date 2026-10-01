@@ -13,7 +13,7 @@ from app.models.product import MatchStatus, MatchTier
 from app.scrapers.registry import get_scraper
 from app.services.catalog_sync import sync_full_catalog
 from app.services.compare_summary import explain_prices
-from app.services.markets import Market, convert_amount
+from app.services.markets import Market, can_convert_currency, convert_amount
 from app.services.matching.pipeline import find_best_match
 from app.services.tenants import tenant_id as tid
 from app.services.urls import (
@@ -118,7 +118,12 @@ async def scrape_url_as_our_product(
     listing_currency = (listing.currency or "").upper() or (market.currency if market else "USD")
     price = float(listing.price or 0)
     # Align listing currency to market when we need a common compare currency.
-    if market and listing_currency != market.currency and price > 0.01:
+    if (
+        market
+        and listing_currency != market.currency
+        and price > 0.01
+        and can_convert_currency(listing_currency, market.currency)
+    ):
         price = convert_amount(price, listing_currency, market.currency)
         product_currency = market.currency
         converted_from = listing_currency

@@ -41,6 +41,11 @@ AGGREGATOR_HOSTS = (
     "gsmarena.com",
     "mobileinto.com",
     "phonearena.com",
+    "pricehistory.app",
+    "pricehistory.com",
+    "camelcamelcamel.com",
+    "keepa.com",
+    "cheapestinindia.com",
 )
 BLOCKED_HOST_PARTS = (
     "facebook.",
@@ -268,12 +273,10 @@ async def _discover_with_product(
             skipped.append({"url": url, "reason": "Same shop as your pasted link"})
             continue
         # Align competitor price into the compare market currency.
-        from app.services.markets import convert_amount
-
-        listing_cur = (listing.currency or market_currency).upper()
-        if listing_cur != market_currency and listing.price:
-            listing.price = convert_amount(listing.price, listing_cur, market_currency)
-        listing.currency = market_currency
+        skip_currency = _align_competitor_currency(listing, market_currency)
+        if skip_currency:
+            skipped.append({"url": url, "reason": skip_currency})
+            continue
         score, miss = _match_score(title, listing.title, storefront_url or product.get("url"))
         if miss:
             skipped.append(
@@ -1108,6 +1111,20 @@ def _canonical_url(url: str) -> str:
 def _host(url: str) -> str:
     host = (urlparse(url).hostname or "").lower()
     return host[4:] if host.startswith("www.") else host
+
+
+def _align_competitor_currency(listing, market_currency: str) -> str | None:
+    """Convert a listing into the compare currency. Unknown currencies are skipped."""
+    from app.services.markets import can_convert_currency, convert_amount
+
+    target = (market_currency or "USD").upper()
+    listing_cur = (listing.currency or target).upper()
+    if listing_cur != target and listing.price:
+        if not can_convert_currency(listing_cur, target):
+            return f"Price is in {listing_cur}, which we don't convert into {target}"
+        listing.price = convert_amount(listing.price, listing_cur, target)
+    listing.currency = target
+    return None
 
 
 def _is_aggregator_host(host: str) -> bool:

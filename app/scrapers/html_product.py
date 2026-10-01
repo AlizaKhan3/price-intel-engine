@@ -12,11 +12,14 @@ from app.models.product import CompetitorListing
 from app.scrapers.parse import (
     amazon_price,
     clean_page_title,
+    finance_context,
     html_document_title,
     is_blocked_html,
     is_generic_site_title,
+    is_monthly_amount,
     iter_jsonld_products,
     jsonld_image,
+    labeled_selling_price,
     meta_price,
     offer_price_and_stock,
     pdt_price,
@@ -52,6 +55,8 @@ def _currency_for(url: str, competitor: str, explicit: str | None) -> str:
         return currency_from_amazon_host(amazon_canonical_host(url))
     if host.endswith(".pk") or competitor == "daraz":
         return "PKR"
+    if host == "pacifiko.com" or host.endswith(".pacifiko.com"):
+        return "GTQ"
     return "USD"
 
 
@@ -149,25 +154,39 @@ def build_listing(url: str, html: str, competitor: str) -> CompetitorListing | N
     if not title or is_generic_site_title(title):
         title = slug_title
 
-    price = structured_price
+    finance = finance_context(html or "")
+    labeled = labeled_selling_price(html or "")
+    is_amazon = competitor == "amazon" or "amazon." in _host(url)
+    buy_box = amazon_price(html or "") if is_amazon else None
+    if structured_price and is_monthly_amount(structured_price, finance):
+        structured_price = None
+    if labeled and is_monthly_amount(labeled, finance):
+        labeled = None
+
+    price = None
     source = "http_scrape"
-    if price is None and (competitor == "amazon" or "amazon." in _host(url)):
-        price = amazon_price(html or "")
-        if price:
-            source = "http_scrape"
+    # The buy box is the selected variant. A structured price can be a different offer.
+    if buy_box:
+        price = buy_box
+        source = "amazon_buybox"
+    elif labeled:
+        price = labeled
+        source = "selling_price"
+    elif structured_price:
+        price = structured_price
     if price is None:
         meta, meta_currency = meta_price(html or "")
-        if meta:
+        if meta and not is_monthly_amount(meta, finance):
             price = meta
             currency = currency or meta_currency
     if price is None:
         embedded = pdt_price(html or "")
-        if embedded:
+        if embedded and not is_monthly_amount(embedded, finance):
             price = embedded
             currency = currency or ("PKR" if competitor == "daraz" or _host(url).endswith(".pk") else None)
     if price is None and title:
         loose = visible_price_from_html(html or "", title)
-        if loose:
+        if loose and not is_monthly_amount(loose, finance):
             price = loose
             source = "visible_text"
 

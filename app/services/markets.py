@@ -41,6 +41,8 @@ _USD_RATES = {
     "SAR": 3.75,
     "CAD": 1.36,
     "AUD": 1.52,
+    # Guatemalan quetzal. Pacifiko prices are GTQ; about 7.75 per US dollar.
+    "GTQ": 7.75,
 }
 
 _PK_SITES = (
@@ -303,16 +305,32 @@ def format_money(amount: float | None, market: Market | None, *, currency: str |
     return f"{symbol}{value:,.2f}"
 
 
+def can_convert_currency(from_currency: str, to_currency: str) -> bool:
+    """True when both codes are the same or both have a USD mid rate."""
+    src = (from_currency or "").upper()
+    dst = (to_currency or "").upper()
+    if not src or not dst:
+        return False
+    if src == dst:
+        return True
+    return src in _USD_RATES and dst in _USD_RATES
+
+
 def convert_amount(amount: float, from_currency: str, to_currency: str) -> float:
-    """Convert via USD mid rates. Same currency → unchanged."""
+    """Convert via USD mid rates. Same currency stays unchanged.
+
+    Unknown currencies are returned unchanged. Callers that display a market
+    currency must check ``can_convert_currency`` first so a quetzal amount is
+    not relabeled as dollars.
+    """
     src = (from_currency or "").upper()
     dst = (to_currency or "").upper()
     if not amount or src == dst:
         return float(amount or 0)
-    src_per_usd = _USD_RATES.get(src)
-    dst_per_usd = _USD_RATES.get(dst)
-    if not src_per_usd or not dst_per_usd:
+    if not can_convert_currency(src, dst):
         return float(amount)
+    src_per_usd = _USD_RATES[src]
+    dst_per_usd = _USD_RATES[dst]
     usd = float(amount) / src_per_usd
     return round(usd * dst_per_usd, 2)
 

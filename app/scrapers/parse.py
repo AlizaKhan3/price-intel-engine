@@ -103,6 +103,8 @@ def parse_visible_price(text: str, title: str = "") -> float | None:
     # The whole snippet is basically the product title.
     if title and snippet.lower() in title.lower() and not has_currency(snippet):
         return None
+    if re.search(r"/mo|per month|installment|shipping|import charge", snippet, re.I):
+        return None
     return price
 
 
@@ -110,6 +112,12 @@ def clean_page_title(title: str) -> str:
     text = unescape(title or "")
     text = re.sub(r"\s+", " ", text).strip()
     text = text.replace("&amp;", "&")
+    text = re.sub(
+        r"(?i)^(?:[$£€]\s*)?\d+(?:\.\d{1,2})?\s*/\s*mo(?:nth)?\s*[-–—|:]\s*(?:finance\s+)?",
+        "",
+        text,
+    )
+    text = re.sub(r"(?i)\s*[\|\-–—]\s*buy now,?\s*pay later.*$", "", text)
     text = re.sub(r"^Amazon\.com\s*:\s*", "", text, flags=re.I)
     text = re.sub(
         r"\s+[\|\-–—]\s+(?:Daraz(?:\.pk)?|Sadiq(?:\.ai)?|Amazon(?:\.[a-z.]+)?|eBay)(?:\s.*)?$",
@@ -209,27 +217,89 @@ def _availability_in_stock(value) -> bool | None:
     return None
 
 
+def _is_list_or_finance_spec(spec: dict) -> bool:
+    """List, compare-at, and per-month specs are not the current selling price."""
+    kind = " ".join(
+        str(spec.get(key) or "")
+        for key in ("priceType", "name", "unitCode", "unitText", "description")
+    )
+    if re.search(r"ListPrice|Strikethrough|MSRP|compare[\s-]?at|list price", kind, re.I):
+        return True
+    if re.search(r"\bMON\b|/mo|per month|installment|month", kind, re.I):
+        return True
+    ref = spec.get("referenceQuantity")
+    if isinstance(ref, dict) and re.search(r"MON|month", str(ref.get("unitCode") or ""), re.I):
+        return True
+    return False
+
+
+def monthly_amounts(text: str) -> set[float]:
+    """Numbers that the page itself calls a monthly or installment payment."""
+    found: set[float] = set()
+    for match in re.finditer(
+        r"(?i)(?:[$£€]|usd\s*)?(\d+(?:\.\d{1,2})?)\s*/\s*mo(?:nth)?\b",
+        text or "",
+    ):
+        try:
+            found.add(float(match.group(1)))
+        except ValueError:
+            continue
+    return found
+
+
+def is_monthly_amount(price: float | None, text: str) -> bool:
+    if price is None:
+        return False
+    return any(abs(price - amount) < 0.02 for amount in monthly_amounts(text))
+
+
+def labeled_selling_price(html: str) -> float | None:
+    """Explicit current price, such as Shopabunda's #productPrice. Ignores /mo."""
+    match = re.search(
+        r'id=["\']productPrice["\'][^>]*>\s*([^<]{1,40})',
+        html or "",
+        re.I,
+    )
+    if not match:
+        return None
+    raw = match.group(1)
+    if re.search(r"/mo|per month|installment", raw, re.I):
+        return None
+    return parse_price(raw)
+
+
+def finance_context(html: str) -> str:
+    """Document title and social title, where shops label a monthly payment."""
+    parts: list[str] = []
+    title = re.search(r"<title[^>]*>(.*?)</title>", html or "", re.I | re.S)
+    if title:
+        parts.append(unescape(title.group(1)))
+    for pattern in (
+        r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']+)["\']',
+        r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:title["\']',
+    ):
+        found = re.search(pattern, html or "", re.I)
+        if found:
+            parts.append(unescape(found.group(1)))
+    return " ".join(parts)
+
+
 def _spec_price(offer: dict) -> float | None:
     specs = offer.get("priceSpecification")
     if isinstance(specs, dict):
         specs = [specs]
     if not isinstance(specs, list):
         return None
-    selling = None
-    list_price = None
     for spec in specs:
         if not isinstance(spec, dict):
             continue
         price = parse_price(spec.get("price"))
         if not price:
             continue
-        kind = str(spec.get("priceType") or "")
-        if re.search(r"ListPrice|Strikethrough", kind, re.I):
-            list_price = list_price or price
+        if _is_list_or_finance_spec(spec):
             continue
-        selling = price
-        break
-    return selling or list_price
+        return price
+    return None
 
 
 def _one_offer_price(offer: dict) -> float | None:
@@ -338,12 +408,29 @@ def _whole_fraction_price(chunk: str) -> float | None:
     return parse_price(raw)
 
 
+_AMAZON_WIDGET_RE = re.compile(
+    r"sl-carousel|sims-fbt|sponsored-products|sp_detail",
+    re.I,
+)
+
+
 def amazon_price(html: str) -> float | None:
-    """Main buy-box price. Ignores empty a-offscreen placeholders and later widgets."""
+    """Selected-variant buy box. Ignores carousels, list prices, and page-wide scans.
+
+    A recommendation widget can contain an ``a-offscreen`` price for a different
+    ASIN. That number is not the item in the buy box, so it is never used.
+    """
+    text = html or ""
     for match in re.finditer(
         r'class="[^"]*(?:priceToPay|apex-pricetopay-value)[^"]*"[\s\S]{0,900}',
-        html or "",
+        text,
     ):
+        opener = match.group(0).split(">", 1)[0]
+        if "a-text-price" in opener:
+            continue
+        before = text[max(0, match.start() - 800) : match.start()]
+        if _AMAZON_WIDGET_RE.search(before):
+            continue
         chunk = match.group(0)
         # Split whole/fraction first. A later a-offscreen in the same window
         # is often a different widget (coupon, recommendation).
@@ -355,14 +442,13 @@ def amazon_price(html: str) -> float | None:
             price = parse_price(offscreen.group(1))
             if price:
                 return price
-    for match in re.finditer(r'class="a-offscreen">\s*([^<]+)', html or ""):
-        raw = match.group(1).strip()
-        if not re.search(r"\d", raw):
-            continue
-        price = parse_price(raw)
-        if price:
-            return price
     return None
+
+
+_NON_SELLING_CLASS_RE = re.compile(
+    r"compare-at|compare_at|was-price|list-price|price-badge|installment|bnpl|a-text-price",
+    re.I,
+)
 
 
 def visible_price_from_html(html: str, title: str) -> float | None:
@@ -376,6 +462,9 @@ def visible_price_from_html(html: str, title: str) -> float | None:
         re.I | re.S,
     )
     for match in pattern.finditer(cleaned):
+        opener = match.group(0).split(">", 1)[0]
+        if _NON_SELLING_CLASS_RE.search(opener):
+            continue
         text = re.sub(r"<[^>]+>", " ", match.group(1))
         price = parse_visible_price(text, title)
         if price:
