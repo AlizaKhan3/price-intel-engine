@@ -5,6 +5,7 @@ import unittest
 
 from app.api.routes_ui import _leaderboard_html, _page
 from app.services.discovery import (
+    _align_competitor_currency,
     _is_product_url,
     _missing_required,
     _model_numbers,
@@ -169,10 +170,35 @@ class ModelMatchTests(unittest.TestCase):
         self.assertFalse(_is_product_url("https://qeemat.com.pk/samsung-galaxy-a16-price-in-pakistan"))
         self.assertFalse(_is_product_url("https://www.dablew.pk/products/jbl-tune-710bt-headphones"))
         self.assertFalse(_is_product_url("https://www.whatmobile.com.pk/Samsung_Galaxy_A16"))
+        self.assertFalse(_is_product_url("https://pricehistory.app/p/puma-tote"))
+        self.assertFalse(_is_product_url("https://camelcamelcamel.com/product/B0DTKJ8H36"))
+        self.assertFalse(_is_product_url("https://keepa.com/#!product/1-B0DTKJ8H36"))
         self.assertTrue(_is_product_url("https://priceoye.pk/mobiles/samsung/samsung-galaxy-a16"))
+        self.assertTrue(
+            _is_product_url("https://www.shopabunda.com/products/puma-womens-plush-soft-nylon-tote-bag")
+        )
         self.assertTrue(
             _is_product_url("https://www.daraz.pk/products/samsung-galaxy-a16-i100.html")
         )
+
+
+class CurrencyAlignTests(unittest.TestCase):
+    def test_gtq_converts_and_unknown_currency_is_skipped(self):
+        class Listing:
+            def __init__(self, price, currency):
+                self.price = price
+                self.currency = currency
+
+        gtq = Listing(400, "GTQ")
+        self.assertIsNone(_align_competitor_currency(gtq, "USD"))
+        self.assertEqual(gtq.price, 51.61)
+        self.assertEqual(gtq.currency, "USD")
+
+        unknown = Listing(400, "XYZ")
+        reason = _align_competitor_currency(unknown, "USD")
+        self.assertIn("XYZ", reason)
+        self.assertEqual(unknown.price, 400)
+        self.assertEqual(unknown.currency, "XYZ")
 
 
 class ProductNameFieldTests(unittest.TestCase):

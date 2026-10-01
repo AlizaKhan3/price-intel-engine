@@ -606,7 +606,7 @@ def _leaderboard_html(
         our_num = float(our_price)
     except (TypeError, ValueError):
         our_num = None
-    if our_num is not None and our_num > 0:
+    if our_num is not None and our_num > 0 and not ours_p.get("price_unknown"):
         shop = (ours_p.get("marketplace") or "").strip() or "Your store"
         entries.append(
             {

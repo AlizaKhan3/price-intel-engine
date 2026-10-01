@@ -13,7 +13,7 @@ from app.models.product import MatchStatus, MatchTier
 from app.scrapers.registry import get_scraper
 from app.services.catalog_sync import sync_full_catalog
 from app.services.compare_summary import explain_prices
-from app.services.markets import Market, convert_amount
+from app.services.markets import Market, can_convert_currency, convert_amount
 from app.services.matching.pipeline import find_best_match
 from app.services.tenants import tenant_id as tid
 from app.services.urls import (
@@ -118,7 +118,12 @@ async def scrape_url_as_our_product(
     listing_currency = (listing.currency or "").upper() or (market.currency if market else "USD")
     price = float(listing.price or 0)
     # Align listing currency to market when we need a common compare currency.
-    if market and listing_currency != market.currency and price > 0.01:
+    if (
+        market
+        and listing_currency != market.currency
+        and price > 0.01
+        and can_convert_currency(listing_currency, market.currency)
+    ):
         price = convert_amount(price, listing_currency, market.currency)
         product_currency = market.currency
         converted_from = listing_currency
@@ -167,6 +172,9 @@ async def scrape_url_as_our_product(
         product["price_unknown"] = True
         product.pop("original_price", None)
         product.pop("original_currency", None)
+    else:
+        # A later successful read must clear an older unknown flag.
+        product["price_unknown"] = False
     await db.catalog_products.update_one(
         {"tenant_id": tenant_key, "id": product_id},
         {"$set": product},
@@ -205,6 +213,27 @@ async def fetch_competitor_listings(
                 return idx, None, friendly_error(exc), True
             listing = build_listing(url, html, competitor)
             wall = blocked_message(url, html)
+            # Amazon alternates between a bot wall, a page whose buy box was
+            # stripped, and a page that includes priceToPay. Recommendation
+            # prices are ignored, so another HTTP read often finds the buy box.
+            # A bot wall is not opened in the browser.
+            if competitor == "amazon" and (listing is None or listing.price_unknown):
+                for _attempt in range(3):
+                    if time.monotonic() >= deadline:
+                        break
+                    try:
+                        html = await fetch_html(url, timeout=10)
+                    except Exception as exc:
+                        logger.info("Amazon price retry failed %s: %s", url, exc)
+                        break
+                    retry_listing = build_listing(url, html, competitor)
+                    if retry_listing and not retry_listing.price_unknown and retry_listing.source != "blocked":
+                        listing = retry_listing
+                        wall = None
+                        break
+                    if retry_listing and retry_listing.source != "blocked":
+                        listing = retry_listing
+                        wall = blocked_message(url, html)
             if wall and listing is None:
                 return idx, None, wall, False
             if listing and not listing.price_unknown:
@@ -323,6 +352,13 @@ async def _read_page_with_retry(playwright, state: dict, competitor: str, url: s
             listing = await get_scraper(competitor).fetch_product(page, url)
             if listing is None:
                 return None, "No title or price on that page."
+            if (
+                listing.price_unknown
+                and competitor == "amazon"
+                and listing.source != "blocked"
+                and attempt == 1
+            ):
+                continue
             return listing, None
         except Exception as exc:
             last = friendly_error(exc)
