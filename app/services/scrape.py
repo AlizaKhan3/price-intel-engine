@@ -210,15 +210,11 @@ async def fetch_competitor_listings(
                 return idx, None, friendly_error(exc), True
             listing = build_listing(url, html, competitor)
             wall = blocked_message(url, html)
-            # Amazon sometimes omits the buy box and only sends recommendation
-            # prices. Those are ignored, so try the page again before giving up.
-            if (
-                competitor == "amazon"
-                and listing
-                and listing.price_unknown
-                and listing.source != "blocked"
-                and not wall
-            ):
+            # Amazon alternates between a bot wall, a page whose buy box was
+            # stripped, and a page that includes priceToPay. Recommendation
+            # prices are ignored, so another HTTP read often finds the buy box.
+            # A bot wall is not opened in the browser.
+            if competitor == "amazon" and (listing is None or listing.price_unknown):
                 for _attempt in range(3):
                     if time.monotonic() >= deadline:
                         break
@@ -228,11 +224,13 @@ async def fetch_competitor_listings(
                         logger.info("Amazon price retry failed %s: %s", url, exc)
                         break
                     retry_listing = build_listing(url, html, competitor)
-                    retry_wall = blocked_message(url, html)
-                    if retry_listing and not retry_listing.price_unknown and not retry_wall:
+                    if retry_listing and not retry_listing.price_unknown and retry_listing.source != "blocked":
                         listing = retry_listing
                         wall = None
                         break
+                    if retry_listing and retry_listing.source != "blocked":
+                        listing = retry_listing
+                        wall = blocked_message(url, html)
             if wall and listing is None:
                 return idx, None, wall, False
             if listing and not listing.price_unknown:

@@ -354,7 +354,7 @@ class AmazonFetchRetryTests(unittest.TestCase):
     def test_amazon_http_retries_until_the_buy_box_is_present(self):
         from app.services.scrape import fetch_competitor_listings
 
-        pages = [AMAZON_CAROUSEL_ONLY, AMAZON_CAROUSEL_ONLY, AMAZON_TOTE]
+        pages = [AMAZON_BOT, AMAZON_CAROUSEL_ONLY, AMAZON_TOTE]
 
         async def fake_fetch(_url, timeout=12):
             return pages.pop(0)
