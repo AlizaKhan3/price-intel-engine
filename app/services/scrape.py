@@ -123,7 +123,6 @@ async def fetch_competitor_listings(
     A crash is retried once and does not discard the other URLs. Confirmed
     bot pages are not opened in Chromium (that is what was OOMing on Railway).
     """
-    from app.scrapers.browser import launch_chromium
     from app.scrapers.html_product import blocked_message, build_listing, fetch_html
     from app.scrapers.parse import friendly_error
 
@@ -171,12 +170,39 @@ async def fetch_competitor_listings(
             slots[idx] = (url, listing, error)
 
     if pending:
-        from playwright.async_api import async_playwright
+        await _browser_fetch_pending(pending, slots, deadline, settings.SCRAPER_USER_AGENT)
 
+    return [slot if slot is not None else (pairs[i][1], None, "Couldn't read that page.") for i, slot in enumerate(slots)]
+
+
+async def _browser_fetch_pending(pending, slots, deadline: float, user_agent: str) -> None:
+    """Open only the URLs HTTP could not price. A dead browser must not fail the compare."""
+    from app.scrapers.browser import launch_chromium
+    from app.scrapers.parse import friendly_error
+
+    def skip_all(reason: str) -> None:
+        for idx, _competitor, url, http_listing, http_error in pending:
+            if slots[idx] is not None:
+                continue
+            slots[idx] = (url, http_listing, http_error or reason)
+
+    try:
+        from playwright.async_api import async_playwright
+    except Exception as exc:
+        logger.warning("Playwright import failed: %s", exc)
+        skip_all(friendly_error(exc))
+        return
+
+    try:
         async with async_playwright() as playwright:
             state: dict = {"browser": None}
             try:
                 state["browser"] = await launch_chromium(playwright)
+            except Exception as exc:
+                logger.warning("Chromium failed to start: %s", exc)
+                skip_all(friendly_error(exc))
+                return
+            try:
                 for n, (idx, competitor, url, http_listing, http_error) in enumerate(pending):
                     if time.monotonic() >= deadline:
                         slots[idx] = (
@@ -191,7 +217,7 @@ async def fetch_competitor_listings(
                         state,
                         competitor,
                         url,
-                        settings.SCRAPER_USER_AGENT,
+                        user_agent,
                     )
                     if listing and not listing.price_unknown:
                         slots[idx] = (url, listing, None)
@@ -200,7 +226,7 @@ async def fetch_competitor_listings(
                     else:
                         slots[idx] = (url, None, error or http_error or "Couldn't read that page.")
                     if n < len(pending) - 1:
-                        await asyncio.sleep(min(0.35, settings.SCRAPER_REQUEST_DELAY_SECONDS))
+                        await asyncio.sleep(0.35)
             finally:
                 browser = state.get("browser")
                 if browser is not None:
@@ -208,8 +234,9 @@ async def fetch_competitor_listings(
                         await browser.close()
                     except Exception:
                         pass
-
-    return [slot if slot is not None else (pairs[i][1], None, "Couldn't read that page.") for i, slot in enumerate(slots)]
+    except Exception as exc:
+        logger.warning("Browser fetch aborted: %s", exc)
+        skip_all(friendly_error(exc))
 
 
 async def _read_page_with_retry(playwright, state: dict, competitor: str, url: str, user_agent: str):

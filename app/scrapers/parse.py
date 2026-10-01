@@ -445,7 +445,17 @@ def friendly_error(exc: BaseException | str) -> str:
         return "That page took too long to open. Try again, or paste a direct product link."
     if "net::" in low or "err_name" in low or "connection" in low and "refused" in low:
         return "We couldn't reach that site. Check the link and try again."
-    if any(token in low for token in ("page.goto", "playwright", "eval_on_selector", "browser.new_context")):
+    if any(
+        token in low
+        for token in (
+            "page.goto",
+            "playwright",
+            "eval_on_selector",
+            "browser.new_context",
+            "browsertype.launch",
+            "executable doesn't exist",
+        )
+    ):
         return "We couldn't read that page. Try again, or paste a direct product link."
     if not text:
         return "We couldn't read a title and price from that page. Try another product link."

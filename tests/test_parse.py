@@ -177,6 +177,9 @@ class ParseTests(unittest.TestCase):
         self.assertIn("memory", message.lower())
         message = friendly_error("Page.eval_on_selector_all: Target crashed")
         self.assertNotIn("eval_on_selector", message)
+        launch = friendly_error("BrowserType.launch: Executable doesn't exist at /ms-playwright/chrome")
+        self.assertNotIn("Executable", launch)
+        self.assertNotIn("BrowserType", launch)
 
     def test_search_fallback_is_short(self):
         self.assertLessEqual(len(HTML_FALLBACKS), 2)
