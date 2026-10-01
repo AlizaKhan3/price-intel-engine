@@ -184,7 +184,9 @@ def build_listing(url: str, html: str, competitor: str) -> CompetitorListing | N
         if embedded and not is_monthly_amount(embedded, finance):
             price = embedded
             currency = currency or ("PKR" if competitor == "daraz" or _host(url).endswith(".pk") else None)
-    if price is None and title:
+    # Amazon recommendation carousels are full of other ASINs' prices. If the
+    # buy box itself has no price, leave it unknown so a browser retry can run.
+    if price is None and title and not is_amazon:
         loose = visible_price_from_html(html or "", title)
         if loose and not is_monthly_amount(loose, finance):
             price = loose

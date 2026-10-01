@@ -127,8 +127,27 @@ AMAZON_TOTE = """
 AMAZON_CAROUSEL_ONLY = """
 <html><head><title>Amazon.com: PUMA Women's Tote</title></head><body>
 <span id="productTitle">PUMA Women's Plush Soft Nylon Tote with Padded Straps</span>
-<div class="sl-carousel-card"><span class="a-offscreen">$143.50</span></div>
+<div id="corePriceDisplay_desktop_feature_div"></div>
+<div class="sl-carousel-card">
+  <span class="a-price" data-a-size="l"><span class="a-offscreen">$143.50</span>
+  <span class="a-price-whole">143</span><span class="a-price-fraction">50</span></span>
+</div>
 <span class="a-color-secondary">$129.17 Shipping &amp; Import Charges to Pakistan</span>
+</body></html>
+"""
+
+AMAZON_BUYBOX_WITHOUT_CLASS = """
+<html><head><title>Amazon.com: PUMA Women's Tote</title></head><body>
+<span id="productTitle">PUMA Women's Plush Soft Nylon Tote with Padded Straps</span>
+<div id="corePriceDisplay_desktop_feature_div">
+  <span class="a-price" data-a-size="xl"><span class="a-offscreen">$31.22</span>
+    <span class="a-price-whole">31</span><span class="a-price-fraction">22</span>
+  </span>
+</div>
+<div class="sl-carousel-card">
+  <span class="a-price"><span class="a-offscreen">$143.50</span>
+  <span class="a-price-whole">143</span><span class="a-price-fraction">50</span></span>
+</div>
 </body></html>
 """
 
@@ -243,6 +262,13 @@ class ParseTests(unittest.TestCase):
         )
         self.assertTrue(missing.price_unknown)
         self.assertEqual(missing.price, 0)
+        plain = build_listing(
+            "https://www.amazon.com/PUMA-Womens-Padded-Closure-Outlook/dp/B0DTKJ8H36",
+            AMAZON_BUYBOX_WITHOUT_CLASS,
+            "amazon",
+        )
+        self.assertEqual(plain.price, 31.22)
+        self.assertFalse(plain.price_unknown)
 
     def test_pacifiko_quetzales_are_not_labeled_as_dollars(self):
         listing = build_listing(

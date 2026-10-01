@@ -414,11 +414,31 @@ _AMAZON_WIDGET_RE = re.compile(
 )
 
 
+def _price_in_amazon_chunk(chunk: str) -> float | None:
+    """First non-strikethrough price inside one buy-box fragment."""
+    for match in re.finditer(r'class="[^"]*a-price[^"]*"[\s\S]{0,500}', chunk or ""):
+        opener = match.group(0).split(">", 1)[0]
+        if "a-text-price" in opener or _AMAZON_WIDGET_RE.search(opener):
+            continue
+        window = match.group(0)
+        price = _whole_fraction_price(window)
+        if price:
+            return price
+        offscreen = re.search(r'class="a-offscreen">\s*([^<]*\d[^<]*)\s*<', window)
+        if offscreen:
+            price = parse_price(offscreen.group(1))
+            if price:
+                return price
+    return None
+
+
 def amazon_price(html: str) -> float | None:
     """Selected-variant buy box. Ignores carousels, list prices, and page-wide scans.
 
-    A recommendation widget can contain an ``a-offscreen`` price for a different
-    ASIN. That number is not the item in the buy box, so it is never used.
+    A recommendation widget can contain an ``a-price`` for a different ASIN
+    (the PUMA tote page includes ``$143.50`` in an ``sl-carousel`` card).
+    That number is not the buy box, so it is never used. Shipping and import
+    charges are outside the buy box and are not added.
     """
     text = html or ""
     for match in re.finditer(
@@ -431,17 +451,26 @@ def amazon_price(html: str) -> float | None:
         before = text[max(0, match.start() - 800) : match.start()]
         if _AMAZON_WIDGET_RE.search(before):
             continue
-        chunk = match.group(0)
-        # Split whole/fraction first. A later a-offscreen in the same window
-        # is often a different widget (coupon, recommendation).
-        price = _whole_fraction_price(chunk)
+        price = _price_in_amazon_chunk(match.group(0))
         if price:
             return price
-        offscreen = re.search(r'class="a-offscreen">\s*([^<]*\d[^<]*)\s*<', chunk)
-        if offscreen:
-            price = parse_price(offscreen.group(1))
-            if price:
-                return price
+    for buybox_id in (
+        "corePriceDisplay_desktop_feature_div",
+        "corePrice_feature_div",
+        "apex_offerDisplay_desktop",
+    ):
+        start = text.find(f'id="{buybox_id}"')
+        if start < 0:
+            start = text.find(f"id='{buybox_id}'")
+        if start < 0:
+            continue
+        chunk = text[start : start + 8000]
+        widget = _AMAZON_WIDGET_RE.search(chunk)
+        if widget:
+            chunk = chunk[: widget.start()]
+        price = _price_in_amazon_chunk(chunk)
+        if price:
+            return price
     return None
 
 
