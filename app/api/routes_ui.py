@@ -27,8 +27,12 @@ def _money(amount, market=None, currency: str | None = None) -> str:
 
 def _price_label(product: dict | None, market=None, currency: str | None = None) -> str:
     if not product or product.get("price_unknown") or not (product.get("price") or 0):
-        return "Price unavailable"
-    return _money(product.get("price"), market, product.get("currency") or currency)
+        label = "Price unavailable"
+    else:
+        label = _money(product.get("price"), market, product.get("currency") or currency)
+    if product and product.get("in_stock") is False:
+        return f"{label} · out of stock"
+    return label
 
 
 def _page(
@@ -39,6 +43,7 @@ def _page(
     actor: str = "",
     market_code: str = "",
     market_source: str = "",
+    product_name: str = "",
 ) -> str:
     market = get_market(market_code) or (
         get_market((result or {}).get("market", {}).get("code")) if result else None
@@ -96,7 +101,8 @@ def _page(
             f"{_esc(competitor_label(listing.get('competitor') or ''))}"
             f"<div class='muted'>{_esc((listing.get('title') or '')[:90])}</div>"
             "</td>"
-            f"<td>{_money(listing.get('price'), market, listing.get('currency') or currency)}</td>"
+            f"<td>{_money(listing.get('price'), market, listing.get('currency') or currency)}"
+            f"{' · out of stock' if listing.get('in_stock') is False else ''}</td>"
                 f"<td>{_esc(row.get('headline'))}</td>"
                 f"<td><a href='{_esc(listing.get('url'))}' target='_blank' rel='noreferrer'>Open</a></td>"
                 "</tr>"
@@ -315,6 +321,7 @@ def _page(
       animation: rise 0.45s ease-out both;
     }}
     .rank.you {{ border-color: #6b5a1a; }}
+    .stage.oos .amt, .rank.oos .amt {{ color: var(--muted); }}
     .rank .badge {{
       width: 36px; height: 36px; border-radius: 10px; display: grid; place-items: center;
       font-weight: 800; font-size: 0.8rem; background: #243044; color: var(--ink);
@@ -352,6 +359,12 @@ def _page(
           <input name="storefront_url" required placeholder="https://any-shop.com/products/..." value="{_esc(ours)}"
             oninput="hintMarket(this.value)"/>
         </label>
+      </div>
+      <div>
+        <label>Product name (optional)
+          <input name="product_name" placeholder="e.g. soundcore P20i earbuds" value="{_esc(product_name)}"/>
+        </label>
+        <p class="muted">If a shop blocks the page and the link has no product name (common on Amazon), type the name here and we will search with that.</p>
       </div>
       <div>
         <label id="market-label">{_market_label(market, market_source)}
@@ -602,6 +615,7 @@ def _leaderboard_html(
                 "price": our_num,
                 "url": ours_p.get("url") or "",
                 "you": True,
+                "oos": ours_p.get("in_stock") is False,
             }
         )
     for row in matches:
@@ -619,12 +633,14 @@ def _leaderboard_html(
                 "price": price,
                 "url": listing.get("url") or "",
                 "you": False,
+                "oos": listing.get("in_stock") is False,
             }
         )
     if len(entries) < 2:
         return ""
 
-    entries.sort(key=lambda item: (item["price"], 0 if item["you"] else 1))
+    # Same order as the summary: in-stock first, then price. Out-of-stock stays visible.
+    entries.sort(key=lambda item: (1 if item["oos"] else 0, item["price"], 0 if item["you"] else 1))
     top = entries[:5]
     cheapest = top[0]["price"]
     tie = 0.01 if (currency or "") not in {"PKR", "JPY", "KRW"} else 1
@@ -635,17 +651,23 @@ def _leaderboard_html(
             continue
         item = top[rank - 1]
         you = " you" if item["you"] else ""
+        oos = " oos" if item["oos"] else ""
         gap = item["price"] - cheapest
-        hint = "Cheapest" if gap < tie else f"+ {_money(gap, market, currency)} vs 1st"
-        if item["you"]:
-            hint = "You're #1 — cheapest" if gap < tie else f"{hint} · you"
+        if item["oos"]:
+            hint = "Out of stock · your listing" if item["you"] else "Out of stock"
+            if gap >= tie:
+                hint = f"{hint} · + {_money(gap, market, currency)} vs 1st"
+        else:
+            hint = "Cheapest" if gap < tie else f"+ {_money(gap, market, currency)} vs 1st"
+            if item["you"]:
+                hint = "You're #1 — cheapest" if gap < tie else f"{hint} · you"
         open_link = (
             f" · <a href='{_esc(item['url'])}' target='_blank' rel='noreferrer'>Open</a>"
             if item["url"]
             else ""
         )
         podium_slots.append(
-            f"<div class='stage {css}{you}'>"
+            f"<div class='stage {css}{you}{oos}'>"
             f"<span class='place'>{_ordinal(rank)}</span>"
             f"<p class='shop'>{_esc(item['name'])}</p>"
             f"<p class='amt'>{_money(item['price'], market, currency)}</p>"
@@ -658,12 +680,15 @@ def _leaderboard_html(
     rest = ""
     for idx, item in enumerate(top[3:], start=4):
         you = " you" if item["you"] else ""
+        oos = " oos" if item["oos"] else ""
         gap = item["price"] - cheapest
         meta = "Your listing" if item["you"] else (item["seller"] or "Competitor")
+        if item["oos"]:
+            meta = f"{meta} · Out of stock"
         if gap >= tie:
             meta = f"{meta} · + {_money(gap, market, currency)} vs 1st"
         rest += (
-            f"<div class='rank{you}' style='animation-delay:{0.05 * idx}s'>"
+            f"<div class='rank{you}{oos}' style='animation-delay:{0.05 * idx}s'>"
             f"<div class='badge'>{_ordinal(idx)}</div>"
             f"<div><p class='name'>{_esc(item['name'])}</p>"
             f"<p class='meta'>{_esc(meta)}</p></div>"
@@ -672,9 +697,13 @@ def _leaderboard_html(
         )
 
     winner = top[0]["name"]
+    if top[0]["oos"]:
+        rank_note = "Every matched shop is out of stock, so the lowest listed price is 1st."
+    else:
+        rank_note = "In-stock shops rank first. Out-of-stock shops are marked and listed after."
     sub = (
         f"{_esc(winner)} is 1st at {_money(cheapest, market, currency)}. "
-        "Ranked by lowest price (same product matches only)."
+        f"{rank_note}"
     )
     return (
         "<section class='board' aria-label='Price leaderboard'>"
@@ -699,11 +728,13 @@ async def compare_submit(
     competitor_url: str = Form(default=""),
     actor: str = Form(default=""),
     market_code: str = Form(default=""),
+    product_name: str = Form(default=""),
 ):
     tenant = await find_tenant_by_slug("sadiq")
     ours = storefront_url.strip()
     theirs = (competitor_url or "").strip()
     who = (actor or "").strip()
+    typed_name = (product_name or "").strip()
     selected = (market_code or "").strip()
     market, market_source = resolve_market(ours, selected or None)
     page_kwargs = {
@@ -712,6 +743,7 @@ async def compare_submit(
         "actor": who,
         "market_code": market.code if market else selected,
         "market_source": market_source,
+        "product_name": typed_name,
     }
     if not tenant:
         return HTMLResponse(
@@ -736,6 +768,7 @@ async def compare_submit(
                 storefront_url=ours,
                 competitor_url=theirs,
                 auto_approve=True,
+                product_name=typed_name,
             )
             # Stamp market onto two-link compare payloads for display.
             if isinstance(result, dict):
@@ -755,7 +788,7 @@ async def compare_submit(
             action = "compare_links"
         else:
             result = await discovery.discover_from_storefront(
-                tenant, ours, market=market
+                tenant, ours, market=market, product_name=typed_name
             )
             action = "discover"
         summary = usage_log.summarize_result(result if isinstance(result, dict) else None)

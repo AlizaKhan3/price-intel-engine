@@ -432,10 +432,17 @@ def is_blocked_html(html: str, title: str = "") -> bool:
     return False
 
 
+SHOP_BLOCKED_MESSAGE = (
+    "This shop blocked automated access. We couldn't read a price from that page."
+)
+
+
 def friendly_error(exc: BaseException | str) -> str:
     """User-facing message. Playwright crash text never reaches the page."""
     text = str(exc or "").strip()
     low = text.lower()
+    if re.search(r"\b403\b", low) or "forbidden" in low or re.search(r"\b429\b", low) or "too many requests" in low:
+        return SHOP_BLOCKED_MESSAGE
     if any(token in low for token in ("crashed", "target closed", "has been closed", "browser closed")):
         return (
             "The page reader ran out of memory and stopped. "

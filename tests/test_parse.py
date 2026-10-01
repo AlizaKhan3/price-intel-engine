@@ -181,6 +181,20 @@ class ParseTests(unittest.TestCase):
         self.assertNotIn("Executable", launch)
         self.assertNotIn("BrowserType", launch)
 
+    def test_forbidden_and_rate_limit_are_friendly(self):
+        blocked = friendly_error(
+            "Client error '403 Forbidden' for url 'https://shop.example/p' "
+            "For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/403"
+        )
+        self.assertIn("blocked automated access", blocked.lower())
+        self.assertNotIn("mozilla", blocked.lower())
+        self.assertNotIn("403", blocked)
+        limited = friendly_error("Client error '429 Too Many Requests' for url 'https://shop.example/p'")
+        self.assertIn("blocked automated access", limited.lower())
+        self.assertNotIn("429", limited)
+        missing = friendly_error("Client error '404 Not Found' for url 'https://shop.example/missing'")
+        self.assertNotIn("blocked automated access", missing.lower())
+
     def test_search_fallback_is_short(self):
         self.assertLessEqual(len(HTML_FALLBACKS), 2)
         called: list[str] = []
