@@ -40,11 +40,32 @@ async def fetch_competitor_listing(competitor: str, competitor_url: str) -> Comp
     )
 
 
+def usable_typed_name(value: str | None) -> str:
+    """A name the user typed, when the page itself has no product title."""
+    from app.scrapers.parse import is_generic_site_title
+
+    text = " ".join((value or "").split())
+    if len(text) < 3 or is_generic_site_title(text):
+        return ""
+    return text[:180]
+
+
+def _with_name_hint(message: str) -> str:
+    text = (message or "").strip()
+    hint = " Type the product name in the form and try again."
+    if "type the product name" in text.lower():
+        return text
+    if len(text) + len(hint) > 300:
+        return text
+    return text.rstrip(".") + "." + hint
+
+
 async def scrape_url_as_our_product(
     tenant: dict,
     product_url: str,
     *,
     market: Market | None = None,
+    product_name: str | None = None,
 ) -> dict:
     """
     Read title + price from any product page and store it as a catalog row.
@@ -58,8 +79,41 @@ async def scrape_url_as_our_product(
         raise ValueError("Paste a full product URL starting with https://")
 
     competitor = competitor_from_url(clean)
-    listing = await fetch_competitor_listing(competitor, clean)
     product_id = external_product_id(clean)
+    typed = usable_typed_name(product_name)
+    listing = None
+    try:
+        listing = await fetch_competitor_listing(competitor, clean)
+    except ValueError as exc:
+        if not typed:
+            raise ValueError(_with_name_hint(str(exc))) from exc
+    if listing is None:
+        shop = competitor_label(competitor)
+        product_currency = market.currency if market else "USD"
+        product = {
+            "tenant_id": tenant_key,
+            "id": product_id,
+            "title": typed,
+            "price": 0,
+            "price_unknown": True,
+            "currency": product_currency,
+            "marketplace": shop,
+            "marketplace_id": competitor,
+            "url": clean,
+            "image_url": None,
+            "active": True,
+            "in_stock": True,
+            "source": "user_title",
+            "synced_at": datetime.utcnow(),
+            "market_code": market.code if market else None,
+        }
+        await db.catalog_products.update_one(
+            {"tenant_id": tenant_key, "id": product_id},
+            {"$set": product},
+            upsert=True,
+        )
+        return product
+
     shop = competitor_label(listing.competitor)
     listing_currency = (listing.currency or "").upper() or (market.currency if market else "USD")
     price = float(listing.price or 0)
@@ -94,11 +148,19 @@ async def scrape_url_as_our_product(
     from app.scrapers.parse import is_generic_site_title
 
     if not product["title"] or is_generic_site_title(product["title"]):
-        raise ValueError(
-            "Could not read a product name from that page. "
-            "If this was Amazon, the link was blocked and we did not guess a price "
-            "or search for the word Amazon. Paste a URL that includes the product name."
-        )
+        if typed:
+            product["title"] = typed
+            product["price"] = 0
+            product["price_unknown"] = True
+            product.pop("original_price", None)
+            product.pop("original_currency", None)
+        else:
+            raise ValueError(
+                _with_name_hint(
+                    "Could not read a product name from that page. "
+                    "We did not guess a price or search for the site name."
+                )
+            )
     if listing.price_unknown or product["price"] <= 0:
         # Real title, no price. Discovery can still search; nothing is invented.
         product["price"] = 0
@@ -292,6 +354,7 @@ async def compare_storefront_and_competitor(
     storefront_url: str,
     competitor_url: str,
     auto_approve: bool = True,
+    product_name: str | None = None,
 ) -> dict:
     from app.services.urls import is_catalog_storefront_url
 
@@ -299,7 +362,9 @@ async def compare_storefront_and_competitor(
         product_id = product_id_from_storefront_url(storefront_url)
         await sync_full_catalog(tenant, product_id=product_id)
     else:
-        product = await scrape_url_as_our_product(tenant, storefront_url)
+        product = await scrape_url_as_our_product(
+            tenant, storefront_url, product_name=product_name
+        )
         product_id = product["id"]
 
     competitor = competitor_from_url(competitor_url)

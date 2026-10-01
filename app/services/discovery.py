@@ -33,6 +33,15 @@ from rapidfuzz import fuzz
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
+# Price guides and spec sites. They are not shops, and fetching them burns the time budget.
+AGGREGATOR_HOSTS = (
+    "qeemat.com.pk",
+    "dablew.pk",
+    "whatmobile.com.pk",
+    "gsmarena.com",
+    "mobileinto.com",
+    "phonearena.com",
+)
 BLOCKED_HOST_PARTS = (
     "facebook.",
     "instagram.",
@@ -120,6 +129,7 @@ async def discover_from_storefront(
     *,
     market: Market | None = None,
     market_code: str | None = None,
+    product_name: str | None = None,
 ) -> dict:
     """
     Paste any product URL → find the same item elsewhere → compare prices.
@@ -139,7 +149,7 @@ async def discover_from_storefront(
             pass
         except Exception as exc:
             logger.warning("Catalog lookup failed for %s (%s); scraping the page", url, exc)
-    return await discover_from_external_url(tenant, url, market=resolved)
+    return await discover_from_external_url(tenant, url, market=resolved, product_name=product_name)
 
 
 async def discover_from_external_url(
@@ -148,8 +158,11 @@ async def discover_from_external_url(
     *,
     max_urls: int | None = None,
     market: Market | None = None,
+    product_name: str | None = None,
 ) -> dict:
-    product = await scrape_url_as_our_product(tenant, product_url, market=market)
+    product = await scrape_url_as_our_product(
+        tenant, product_url, market=market, product_name=product_name
+    )
     return await _discover_with_product(
         tenant,
         product,
@@ -494,6 +507,9 @@ async def _search_candidates(
             return
         if snippet_title:
             score, miss = _match_score(title, snippet_title, storefront_url)
+            # A cover or a different model (A16 vs A17) must not sneak in via the URL slug.
+            if miss and ("accessory" in miss or "model mismatch" in miss):
+                return
             if miss or score < max(50, settings.DISCOVERY_MIN_SCORE - 18):
                 if not _url_slug_matches(title, clean, storefront_url):
                     return
@@ -597,7 +613,11 @@ def _slug_words(storefront_url: str | None) -> list[str]:
 
 
 def _url_slug_matches(title: str, url: str, storefront_url: str | None = None) -> bool:
-    path = (urlparse(url).path or "").lower().replace("-", " ").replace("_", " ").replace("/", " ")
+    raw_path = urlparse(url).path or ""
+    # Daraz ids (-i465976536.html) are not part of the model code.
+    raw_path = re.sub(r"-i\d+.*$", "", raw_path, flags=re.I)
+    raw_path = re.sub(r"\.(html?|php)$", "", raw_path, flags=re.I)
+    path = raw_path.lower().replace("-", " ").replace("_", " ").replace("/", " ")
     path = re.sub(r"([a-z])(\d)", r"\1 \2", path)
     path = re.sub(r"(\d)([a-z])", r"\1 \2", path)
     path_words = {w for w in path.split() if w}
@@ -608,6 +628,10 @@ def _url_slug_matches(title: str, url: str, storefront_url: str | None = None) -
         rest = brand - MEGA_BRANDS
         if hit < need and not (rest and rest <= path_words):
             return False
+    if _is_accessory_title(path) and not _is_accessory_title(title):
+        return False
+    if _strict_model_conflict(title, path):
+        return False
     models = _model_numbers(title)
     if models and not (models & _model_numbers(path)):
         return False
@@ -654,6 +678,12 @@ def _edition_tokens(text: str) -> set[str]:
 
 
 def _missing_required(ours: str, theirs: str, storefront_url: str | None) -> str | None:
+    if _is_accessory_title(theirs) and not _is_accessory_title(ours):
+        return "Different product (accessory, not the main item)"
+    if _strict_model_conflict(ours, theirs):
+        needed = _strict_model_codes(ours) or _model_numbers(ours)
+        return "Different product (model mismatch: need " + "/".join(sorted(needed)) + ")"
+
     our_words = set(_normalize_title(f"{ours} {' '.join(_slug_words(storefront_url))}").split())
     their_words = set(_normalize_title(theirs).split())
     brand = _brand_tokens(ours, storefront_url)
@@ -663,9 +693,14 @@ def _missing_required(ours: str, theirs: str, storefront_url: str | None) -> str
     their_exp |= set(re.sub(r"([a-z])(\d)", r"\1 \2", " ".join(their_words)).split())
     brand_ok = _brand_ok(brand, their_exp)
 
+    our_strict, _our_loose = _split_models(ours)
+    their_strict, _their_loose = _split_models(theirs)
     our_models = _model_numbers(ours)
     their_models = _model_numbers(theirs)
-    if our_models and not (our_models & their_models):
+    # RAM/storage digits must not veto a shared model code (A16 6GB vs A16).
+    if our_strict and their_strict and (our_strict & their_strict):
+        pass
+    elif our_models and not (our_models & their_models):
         return (
             "Different product (model mismatch: need "
             + "/".join(sorted(our_models))
@@ -823,31 +858,151 @@ def _brand_tokens(ours: str, storefront_url: str | None) -> set[str]:
     return set(words[:2])
 
 
-def _model_numbers(text: str) -> set[str]:
-    """Product model digits (Watch 5 / Watch5), ignoring sizes and mode counts."""
-    raw = re.sub(r"([a-zA-Z])(\d)", r"\1 \2", text or "")
-    raw = re.sub(r"(\d)([a-zA-Z])", r"\1 \2", raw)
-    low = raw.lower()
-    found = set()
-    for token in re.findall(r"\b\d{1,4}\b", low):
+# Letter-led model codes (A16, S24, P20i) and digit-led ones (710BT).
+_LETTER_CODE = re.compile(r"\b([a-z]{1,3})(\d{1,4})([a-z]{0,3})\b")
+_DIGIT_FEATURE = re.compile(r"\b(\d{2,4})(bt|nc|anc)\b")
+_UNIT_SUFFIX = frozenset({"w", "v", "ml", "mah", "mm", "cm", "kg", "gb", "tb", "hz", "oz", "g", "l"})
+_SKIP_PREFIX = frozenset(
+    {
+        "rs",
+        "pkr",
+        "usd",
+        "mm",
+        "cm",
+        "gb",
+        "tb",
+        "ml",
+        "kg",
+        "oz",
+        "pk",
+        "ipx",
+        "usb",
+        "led",
+        "mah",
+        "ram",
+        "rom",
+        "sim",
+        "for",
+        "and",
+        "the",
+        "pro",
+        "max",
+        "new",
+    }
+)
+_ACCESSORY_TITLE = re.compile(
+    r"\b("
+    r"covers?|cases?|casings?|pouches?|sleeves?|bumpers?|"
+    r"protectors?|screen\s+guards?|tempered\s+glass|"
+    r"(?:charger|cable|case|cover|protector|glass)\s+for|"
+    r"data\s+cables?|charging\s+cables?|"
+    r"back\s+covers?|flip\s+covers?|phone\s+covers?|mobile\s+covers?"
+    r")\b",
+    re.I,
+)
+
+
+def _compact_model_text(text: str) -> str:
+    """Glue spaced model codes (A 16, 710 BT) without joining words like Watch 5."""
+    low = (text or "").lower().replace("_", " ")
+    low = re.sub(r"[\-–—/]+", " ", low)
+    # "a 16" / "p 20 i" → a16 / p20i. Do not swallow the next word ("a 16 pro").
+    low = re.sub(
+        r"\b([a-z])\s+(\d{1,4})(?:\s+([a-z]))?(?=\s|$)",
+        lambda match: f"{match.group(1)}{match.group(2)}{match.group(3) or ''}",
+        low,
+    )
+    low = re.sub(r"\b(\d{2,4})\s+(bt|nc|anc)\b", r"\1\2", low)
+    return low
+
+
+def _is_accessory_title(title: str) -> bool:
+    """True when the listing is a cover, case, protector, or a charger/cable itself."""
+    text = title or ""
+    if _ACCESSORY_TITLE.search(text):
+        return True
+    if re.search(r"\b(chargers?|cables?)\b", text, re.I):
+        if re.search(r"\b(with|includes|including|plus)\s+(a\s+)?(chargers?|cables?)\b", text, re.I):
+            return False
+        return True
+    return False
+
+
+def _split_models(text: str) -> tuple[set[str], set[str]]:
+    """Strict alphanumeric codes, plus leftover model digits (Watch 5)."""
+    low = _compact_model_text(text)
+    strict: set[str] = set()
+    spans: list[tuple[int, int]] = []
+    for match in _DIGIT_FEATURE.finditer(low):
+        digits, suffix = match.group(1), match.group(2)
+        strict.add(f"{digits}{suffix}")
+        strict.add(digits)
+        spans.append(match.span())
+    for match in _LETTER_CODE.finditer(low):
+        if any(start <= match.start() < end for start, end in spans):
+            continue
+        prefix, digits, suffix = match.group(1), match.group(2), match.group(3)
+        if prefix in _SKIP_PREFIX or suffix in _UNIT_SUFFIX:
+            continue
+        strict.add(f"{prefix}{digits}{suffix}")
+        spans.append(match.span())
+
+    chars = list(low)
+    for start, end in spans:
+        for index in range(start, end):
+            chars[index] = " "
+    bare = "".join(chars)
+    bare = re.sub(r"([a-z])(\d)", r"\1 \2", bare)
+    bare = re.sub(r"(\d)([a-z])", r"\1 \2", bare)
+    loose: set[str] = set()
+    for token in re.findall(r"\b\d{1,4}\b", bare):
         if token in SIZE_NUMBERS:
             continue
         if len(token) == 4 and token.startswith(("19", "20")):
             continue
-        # 150ml / 680ml / 40mm — capacity/size, not model identity.
-        if re.search(rf"\b{re.escape(token)}\s*(ml|g|kg|mm|cm|oz|mah)\b", low):
+        if re.search(rf"\b{re.escape(token)}\s*(ml|g|kg|mm|cm|oz|mah)\b", bare):
             continue
-        # IPX7 waterproof rating.
-        if re.search(rf"\bipx\s*-?\s*{re.escape(token)}\b", low) or f"ipx{token}" in low:
+        if re.search(rf"\bipx\s*-?\s*{re.escape(token)}\b", bare) or f"ipx{token}" in bare.replace(" ", ""):
             continue
-        # "5/6 Modes" or "5-Mode" — feature count, not SKU model.
         if re.search(
             rf"\b{re.escape(token)}\s*(?:/\s*\d+\s*)?[- ]?modes?\b",
-            low,
-        ) or re.search(rf"\bmodes?\s*{re.escape(token)}\b", low):
+            bare,
+        ) or re.search(rf"\bmodes?\s*{re.escape(token)}\b", bare):
             continue
-        found.add(token)
-    return found
+        loose.add(token)
+    return strict, loose
+
+
+def _model_numbers(text: str) -> set[str]:
+    """Model identity: A16 / S24 / P20i / 710BT, plus plain numbers like Watch 5."""
+    strict, loose = _split_models(text)
+    return strict | loose
+
+
+def _strict_model_codes(text: str) -> set[str]:
+    strict, _loose = _split_models(text)
+    return strict
+
+
+def _strict_stems(codes: set[str]) -> set[str]:
+    stems: set[str] = set()
+    for code in codes:
+        match = re.fullmatch(r"(\d{2,4})(bt|nc|anc)", code)
+        stems.add(match.group(1) if match else code)
+    return stems
+
+
+def _strict_model_conflict(ours: str, theirs: str) -> bool:
+    """Alphanumeric codes must agree. A16 is not A17, and 710BT is not 510BT."""
+    our_strict = _strict_model_codes(ours)
+    their_strict = _strict_model_codes(theirs)
+    if our_strict and their_strict:
+        return not (our_strict & their_strict)
+    if our_strict:
+        return not (_strict_stems(our_strict) & _model_numbers(theirs))
+    if their_strict:
+        return not (_strict_stems(their_strict) & _model_numbers(ours))
+    return False
 
 
 def _product_type_queries(title: str) -> list[str]:
@@ -955,6 +1110,13 @@ def _host(url: str) -> str:
     return host[4:] if host.startswith("www.") else host
 
 
+def _is_aggregator_host(host: str) -> bool:
+    name = (host or "").lower()
+    if name.startswith("www."):
+        name = name[4:]
+    return any(name == item or name.endswith("." + item) for item in AGGREGATOR_HOSTS)
+
+
 def _one_per_shop(comparisons: list[dict]) -> list[dict]:
     from app.scrapers.parse import comparison_rank
 
@@ -1040,6 +1202,8 @@ def _is_product_url(url: str, market: Market | None = None) -> bool:
     host = (parsed.hostname or "").lower()
     path = parsed.path or "/"
     host_cmp = host[4:] if host.startswith("www.") else host
+    if _is_aggregator_host(host):
+        return False
     if any(part in host for part in BLOCKED_HOST_PARTS):
         return False
     if "amazon." in host_cmp:
@@ -1065,33 +1229,12 @@ def _is_product_url(url: str, market: Market | None = None) -> bool:
 
 
 def _pack(product, comparisons, skipped, storefront_url, searched, market: Market | None = None) -> dict:
-    from app.services.markets import format_money
-
     market = market or get_market(product.get("market_code"))
     currency = product.get("currency") or (market.currency if market else "USD")
-    cheapest = comparisons[0] if comparisons else None
     shops = len(comparisons)
-    price_unknown = bool(product.get("price_unknown")) or not (product.get("price") or 0)
-    if price_unknown and cheapest:
-        cheap_name = competitor_label((cheapest.get("competitor_listing") or {}).get("competitor") or "a shop")
-        cheap_price = (cheapest.get("competitor_listing") or {}).get("price")
-        headline = f"Found {shops} shop{'s' if shops != 1 else ''}. Your price couldn't be read."
-        detail = (
-            f"The site blocked or hid your price, so nothing was guessed. "
-            f"Lowest listed price is {cheap_name} at {format_money(cheap_price, market, currency=currency)}."
-        )
-    elif cheapest:
-        cheap_name = competitor_label((cheapest.get("competitor_listing") or {}).get("competitor") or "a shop")
-        cheap_price = (cheapest.get("competitor_listing") or {}).get("price")
-        headline = cheapest.get("headline") or ""
-        detail = (
-            f"Compared {shops} shops. Cheapest is {cheap_name} at "
-            f"{format_money(cheap_price, market, currency=currency)}. "
-            f"Your price is {format_money(product.get('price') or 0, market, currency=currency)}."
-        )
-    else:
-        headline = "No matching product pages were found. Try a more specific title, or paste a competitor URL."
-        detail = "Search ran, but nothing cleared the title/price match bar."
+    headline, detail, cheaper, difference = _summary_copy(
+        product, comparisons, market=market, currency=currency
+    )
     return {
         "provider": search_provider(),
         "product_id": product["id"],
@@ -1105,6 +1248,7 @@ def _pack(product, comparisons, skipped, storefront_url, searched, market: Marke
             "original_currency": product.get("original_currency"),
             "marketplace": product.get("marketplace"),
             "url": storefront_url or product.get("url"),
+            "in_stock": product.get("in_stock", True) is not False,
         },
         "market": {
             "code": market.code if market else None,
@@ -1118,9 +1262,131 @@ def _pack(product, comparisons, skipped, storefront_url, searched, market: Marke
         "skipped": skipped,
         "match_count": shops,
         "headline": headline,
-        "cheaper": (cheapest or {}).get("cheaper"),
-        "difference_rs": (cheapest or {}).get("difference_rs"),
-        "difference": (cheapest or {}).get("difference") or (cheapest or {}).get("difference_rs"),
+        "cheaper": cheaper,
+        "difference_rs": difference,
+        "difference": difference,
         "currency": currency,
         "detail": detail,
     }
+
+
+def _money_of(amount, market, currency: str) -> str:
+    from app.services.markets import format_money
+
+    return format_money(amount, market, currency=currency)
+
+
+def _board_rows(product: dict, comparisons: list[dict]) -> list[dict]:
+    """User plus competitors, in-stock first, then lowest price."""
+    rows: list[dict] = []
+    try:
+        our_price = float(product.get("price") or 0)
+    except (TypeError, ValueError):
+        our_price = 0
+    our_unknown = bool(product.get("price_unknown")) or our_price <= 0
+    if not our_unknown:
+        rows.append(
+            {
+                "name": (product.get("marketplace") or "Your shop").strip() or "Your shop",
+                "price": our_price,
+                "in_stock": product.get("in_stock", True) is not False,
+                "you": True,
+            }
+        )
+    for row in comparisons:
+        listing = row.get("competitor_listing") or {}
+        try:
+            price = float(listing.get("price") or 0)
+        except (TypeError, ValueError):
+            continue
+        if price <= 0:
+            continue
+        rows.append(
+            {
+                "name": competitor_label(listing.get("competitor") or "a shop"),
+                "price": price,
+                "in_stock": listing.get("in_stock", True) is not False,
+                "you": False,
+            }
+        )
+    rows.sort(key=lambda item: (0 if item["in_stock"] else 1, item["price"], 0 if item["you"] else 1))
+    return rows
+
+
+def _summary_copy(
+    product: dict,
+    comparisons: list[dict],
+    *,
+    market,
+    currency: str,
+) -> tuple[str, str, str | None, float | None]:
+    """Headline, detail, cheaper, difference. The user's own price can win."""
+    shops = len(comparisons)
+    shop_word = "shop" if shops == 1 else "shops"
+    rows = _board_rows(product, comparisons)
+    in_stock = [row for row in rows if row["in_stock"]]
+    winner = in_stock[0] if in_stock else (rows[0] if rows else None)
+    price_unknown = bool(product.get("price_unknown")) or not (product.get("price") or 0)
+    try:
+        our_price = float(product.get("price") or 0)
+    except (TypeError, ValueError):
+        our_price = 0
+    our_in_stock = product.get("in_stock", True) is not False
+
+    if winner is None:
+        return (
+            "No matching product pages were found. Try a more specific title, or paste a competitor URL.",
+            "Search ran, but nothing cleared the title/price match bar.",
+            None,
+            None,
+        )
+
+    winner_money = _money_of(winner["price"], market, currency)
+    winner_stock = "" if winner["in_stock"] else " (out of stock)"
+    if price_unknown:
+        kind = "Lowest in-stock price" if winner["in_stock"] else "Lowest listed price"
+        return (
+            f"Found {shops} {shop_word}. Your price couldn't be read.",
+            (
+                "The site blocked or hid your price, so nothing was guessed. "
+                f"{kind} is {winner['name']} at {winner_money}{winner_stock}."
+            ),
+            None,
+            None,
+        )
+
+    your_money = _money_of(our_price, market, currency)
+    your_stock = "" if our_in_stock else " (out of stock)"
+    if winner["you"]:
+        nxt = next((row for row in in_stock if not row["you"]), None)
+        detail = (
+            f"Compared {shops} {shop_word}. Cheapest is {winner['name']} (your price) at {winner_money}."
+        )
+        difference = 0.0
+        if nxt:
+            detail += f" Next is {nxt['name']} at {_money_of(nxt['price'], market, currency)}."
+            difference = round(nxt["price"] - winner["price"], 2)
+        return (
+            f"{winner['name']} is the cheapest at {winner_money}.",
+            detail,
+            "us",
+            difference,
+        )
+
+    detail = (
+        f"Compared {shops} {shop_word}. Cheapest is {winner['name']}{winner_stock} at {winner_money}. "
+        f"Your price is {your_money}{your_stock}."
+    )
+    tie = 1 if currency == "PKR" else 0.01
+    if our_in_stock and winner["in_stock"] and abs(our_price - winner["price"]) < tie:
+        cheaper = "tie"
+        difference = 0.0
+    else:
+        cheaper = "competitor"
+        difference = round(our_price - winner["price"], 2) if our_price else None
+    return (
+        f"{winner['name']} is the cheapest at {winner_money}{winner_stock}.",
+        detail,
+        cheaper,
+        difference,
+    )
