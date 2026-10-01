@@ -1,6 +1,7 @@
 """Parsing rules for prices, bot pages, and search fallbacks."""
 from __future__ import annotations
 
+import asyncio
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -347,6 +348,34 @@ class ParseTests(unittest.TestCase):
         ):
             search_web("jbl tune 710bt headphones", 5, None)
         self.assertEqual(called, ["ddg", "bing"])
+
+
+class AmazonFetchRetryTests(unittest.TestCase):
+    def test_amazon_http_retries_until_the_buy_box_is_present(self):
+        from app.services.scrape import fetch_competitor_listings
+
+        pages = [AMAZON_CAROUSEL_ONLY, AMAZON_CAROUSEL_ONLY, AMAZON_TOTE]
+
+        async def fake_fetch(_url, timeout=12):
+            return pages.pop(0)
+
+        async def run():
+            with patch("app.scrapers.html_product.fetch_html", side_effect=fake_fetch):
+                return await fetch_competitor_listings(
+                    [
+                        (
+                            "amazon",
+                            "https://www.amazon.com/PUMA-Womens-Padded-Closure-Outlook/dp/B0DTKJ8H36",
+                        )
+                    ],
+                    budget_seconds=10,
+                )
+
+        rows = asyncio.run(run())
+        listing = rows[0][1]
+        self.assertEqual(listing.price, 31.22)
+        self.assertFalse(listing.price_unknown)
+        self.assertEqual(pages, [])
 
 
 if __name__ == "__main__":

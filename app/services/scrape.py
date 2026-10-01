@@ -210,6 +210,29 @@ async def fetch_competitor_listings(
                 return idx, None, friendly_error(exc), True
             listing = build_listing(url, html, competitor)
             wall = blocked_message(url, html)
+            # Amazon sometimes omits the buy box and only sends recommendation
+            # prices. Those are ignored, so try the page again before giving up.
+            if (
+                competitor == "amazon"
+                and listing
+                and listing.price_unknown
+                and listing.source != "blocked"
+                and not wall
+            ):
+                for _attempt in range(3):
+                    if time.monotonic() >= deadline:
+                        break
+                    try:
+                        html = await fetch_html(url, timeout=10)
+                    except Exception as exc:
+                        logger.info("Amazon price retry failed %s: %s", url, exc)
+                        break
+                    retry_listing = build_listing(url, html, competitor)
+                    retry_wall = blocked_message(url, html)
+                    if retry_listing and not retry_listing.price_unknown and not retry_wall:
+                        listing = retry_listing
+                        wall = None
+                        break
             if wall and listing is None:
                 return idx, None, wall, False
             if listing and not listing.price_unknown:
@@ -328,6 +351,13 @@ async def _read_page_with_retry(playwright, state: dict, competitor: str, url: s
             listing = await get_scraper(competitor).fetch_product(page, url)
             if listing is None:
                 return None, "No title or price on that page."
+            if (
+                listing.price_unknown
+                and competitor == "amazon"
+                and listing.source != "blocked"
+                and attempt == 1
+            ):
+                continue
             return listing, None
         except Exception as exc:
             last = friendly_error(exc)
