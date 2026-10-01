@@ -1323,6 +1323,13 @@ def _summary_copy(
     """Headline, detail, cheaper, difference. The user's own price can win."""
     shops = len(comparisons)
     shop_word = "shop" if shops == 1 else "shops"
+    if shops == 0:
+        return (
+            "No matching product pages were found. Try a more specific title, or paste a competitor URL.",
+            "Search ran, but nothing cleared the title/price match bar.",
+            None,
+            None,
+        )
     rows = _board_rows(product, comparisons)
     in_stock = [row for row in rows if row["in_stock"]]
     winner = in_stock[0] if in_stock else (rows[0] if rows else None)

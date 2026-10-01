@@ -69,6 +69,11 @@ class SummaryTests(unittest.TestCase):
         self.assertNotIn("Cheapest is Vmart", packed["detail"])
         self.assertNotIn("(out of stock)", packed["headline"].lower())
 
+    def test_no_matches_does_not_call_the_user_cheapest(self):
+        packed = _pack(self._product(46999), [], [], "https://priceoye.pk/mobiles/samsung/samsung-galaxy-a16", [])
+        self.assertIn("No matching product pages", packed["headline"])
+        self.assertNotIn("Cheapest is", packed["detail"])
+
     def test_leaderboard_ranks_in_stock_first(self):
         product = self._product(3040)
         matches = [_row("techmen", 14990), _row("vmart", 500, in_stock=False)]
